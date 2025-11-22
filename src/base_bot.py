@@ -168,8 +168,10 @@ class BaseBot(ABC):
 
     def _authenticate(self) -> str:
         auth = {"username": self.username, "password": self._password}
+        print(auth)
         url = f"{self._cmi_url}/api/user/authenticate"
         response = requests.post(url, headers=STANDARD_HEADERS, json=auth)
         response.raise_for_status()
+        print(response.headers)
 
         return response.headers["Authorization"]

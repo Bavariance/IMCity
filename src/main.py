@@ -16,10 +16,10 @@ def main():
     try:
         bot = BavarianceBot(TEST_EXCHANGE, username, password)
         # TODO: Uncomment the code below
-        # bot.start()
+        bot.start()
 
-        # while True:
-        #     pass
+        while True:
+            pass
     except KeyboardInterrupt as e:
         bot.stop()
 
