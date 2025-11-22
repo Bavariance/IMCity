@@ -13,7 +13,6 @@ from google.cloud import storage  # pip install google-cloud-storage
 
 # ----------------- Logging setup -----------------
 
-# Simple console logger; systemd will capture stdout/stderr into journal
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -23,26 +22,26 @@ logger = logging.getLogger("eisbach.scraper")
 # ----------------- Local paths -----------------
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-logger.info(f"PROJECT_ROOT set to {PROJECT_ROOT}")
+logger.info("PROJECT_ROOT set to %s", PROJECT_ROOT)
 
 # Canonical 15‑minute time-series lives in data/
 DATA_DIR = PROJECT_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 CANONICAL_CSV = DATA_DIR / "eisbach_15min.csv"
-logger.info(f"Canonical CSV path: {CANONICAL_CSV}")
+logger.info("Canonical CSV path: %s", CANONICAL_CSV)
 
 # Live artifacts (small, for convenience) live in live_data/
 LIVE_DIR = PROJECT_ROOT / "live_data"
 LIVE_DIR.mkdir(parents=True, exist_ok=True)
 LATEST_JSON = LIVE_DIR / "latest_snapshot.json"
-logger.info(f"Latest JSON path: {LATEST_JSON}")
+logger.info("Latest JSON path: %s", LATEST_JSON)
 
 # ----------------- GCS config ------------------
 
 GCS_BUCKET = os.environ.get("GCS_BUCKET")              # e.g. "imcity_live_data"
 GCS_PREFIX = os.environ.get("GCS_PREFIX", "live_data")  # folder inside bucket
 
-logger.info(f"GCS_BUCKET={GCS_BUCKET!r}, GCS_PREFIX={GCS_PREFIX!r}")
+logger.info("GCS_BUCKET=%r, GCS_PREFIX=%r", GCS_BUCKET, GCS_PREFIX)
 
 _storage_client: storage.Client | None = None
 
@@ -52,18 +51,14 @@ def get_storage_client() -> storage.Client:
     global _storage_client
     if _storage_client is None:
         logger.info("Creating new google.cloud.storage.Client()")
-        _storage_client = storage.Client()   # uses VM service account / ADC
-        logger.info(
-            f"Storage client project: {_storage_client.project!r}"
-        )
+        _storage_client = storage.Client()
+        logger.info("Storage client project: %r", _storage_client.project)
     return _storage_client
 
 
 def upload_to_gcs(local_path: Path, object_name: str) -> None:
     """
-    Uploads local_path to gs://GCS_BUCKET/object_name.
-
-    Logs detailed information and re-raises on failure so systemd sees errors.
+    Upload local_path to gs://GCS_BUCKET/object_name.
     """
     if not GCS_BUCKET:
         logger.warning(
@@ -85,21 +80,15 @@ def upload_to_gcs(local_path: Path, object_name: str) -> None:
         GCS_BUCKET,
         object_name,
     )
-    try:
-        bucket = client.bucket(GCS_BUCKET)
-        blob = bucket.blob(object_name)
-        blob.upload_from_filename(str(local_path))
-        logger.info(
-            "[GCS] Uploaded %s -> gs://%s/%s",
-            local_path,
-            GCS_BUCKET,
-            object_name,
-        )
-    except Exception as e:
-        logger.exception(
-            "Upload to gs://%s/%s failed: %s", GCS_BUCKET, object_name, e
-        )
-        raise
+    bucket = client.bucket(GCS_BUCKET)
+    blob = bucket.blob(object_name)
+    blob.upload_from_filename(str(local_path))
+    logger.info(
+        "[GCS] Uploaded %s -> gs://%s/%s",
+        local_path,
+        GCS_BUCKET,
+        object_name,
+    )
 
 # ----------------- Scraping logic --------------
 
@@ -107,17 +96,19 @@ HND_BASE = (
     "https://www.hnd.bayern.de/pegel/isar/"
     "muenchen-himmelreichbruecke-16515005/tabelle"
 )
-logger.info(f"HND_BASE={HND_BASE}")
+logger.info("HND_BASE=%s", HND_BASE)
 
 
-def _fetch_table(methode: str) -> pd.DataFrame:
+def _fetch_full_table(methode: str) -> pd.DataFrame:
     """
-    Fetch the HND HTML table for 'wasserstand' or 'abfluss' and return as DataFrame.
-    """
-    params: dict[str, str] = {"methode": methode}
-    if methode == "abfluss":
-        params["setdiskr"] = "15"  # 15‑minute discharge values
+    Fetch the *full* 15‑minute HND HTML table for 'wasserstand' or 'abfluss'
+    and return a DataFrame with canonical timestamp strings.
 
+    Result columns:
+        - timestamp_local: 'YYYY-MM-DD HH:MM'
+        - value: float (cm or m³/s)
+    """
+    params: dict[str, str] = {"methode": methode, "setdiskr": "15"}
     logger.info("Requesting HND table: methode=%s params=%s", methode, params)
     resp = requests.get(HND_BASE, params=params, timeout=15)
     logger.info("HND response: status=%s url=%s", resp.status_code, resp.url)
@@ -131,97 +122,143 @@ def _fetch_table(methode: str) -> pd.DataFrame:
     df = tables[0]
     logger.debug("Raw table head for %s:\n%s", methode, df.head())
 
+    # First two columns: timestamp (DD.MM.YYYY HH:MM) and value
     df = df.iloc[:, :2].copy()
     df.columns = ["timestamp_local_raw", "value"]
+
+    # Convert to canonical local timestamp format
+    ts = pd.to_datetime(df["timestamp_local_raw"], dayfirst=True)
+    df["timestamp_local"] = ts.dt.strftime("%Y-%m-%d %H:%M")
+
+    # Keep only canonical timestamp + value
+    df = df[["timestamp_local", "value"]]
+
+    # HND lists newest first; sort ascending so we can append naturally
+    df = df.sort_values("timestamp_local").reset_index(drop=True)
+    logger.info(
+        "Fetched %d rows for %s; oldest=%s newest=%s",
+        len(df),
+        methode,
+        df["timestamp_local"].iloc[0],
+        df["timestamp_local"].iloc[-1],
+    )
     return df
 
 
-def fetch_eisbach_point() -> dict:
+def fetch_eisbach_table() -> pd.DataFrame:
     """
-    Scrape latest Wasserstand (cm) and Abfluss (m³/s) from HND and return a canonical dict.
-    Ensures both series use the same local timestamp.
-    """
-    logger.info("Fetching latest Wasserstand/Abfluss from HND")
-    level_df = _fetch_table("wasserstand")
-    flow_df = _fetch_table("abfluss")
+    Fetch full 15‑minute Wasserstand and Abfluss tables and merge them
+    into a single DataFrame.
 
-    # Merge on the raw local timestamp to align both series
+    Result columns:
+        - timestamp_local
+        - waterlevel_cm
+        - discharge_m3s
+        - status_level
+        - status_flow
+    """
+    logger.info("Fetching full 15‑minute Wasserstand + Abfluss tables")
+    level_df = _fetch_full_table("wasserstand")
+    flow_df = _fetch_full_table("abfluss")
+
     merged = pd.merge(
         level_df,
         flow_df,
-        on="timestamp_local_raw",
-        how="inner",
+        on="timestamp_local",
+        how="outer",
         suffixes=("_level", "_flow"),
+    ).sort_values("timestamp_local")
+
+    merged.rename(
+        columns={
+            "value_level": "waterlevel_cm",
+            "value_flow": "discharge_m3s",
+        },
+        inplace=True,
     )
-    if merged.empty:
-        raise RuntimeError("No common timestamps between level and flow tables")
 
-    row = merged.iloc[0]
-    logger.info("Merged latest row: %s", row.to_dict())
+    # Near-real-time data from HND/GKD is typically 'Rohdaten'
+    merged["status_level"] = "Rohdaten"
+    merged["status_flow"] = "Rohdaten"
 
-    tz_local = pytz.timezone("Europe/Berlin")
-    ts_local_parsed = pd.to_datetime(row["timestamp_local_raw"], dayfirst=True)
-    ts_local = tz_local.localize(ts_local_parsed)
-    ts_utc = ts_local.astimezone(pytz.UTC)
-
-    timestamp_local = ts_local.strftime("%Y-%m-%d %H:%M")
-    timestamp_utc = ts_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    status_level = "Rohdaten"
-    status_flow = "Rohdaten"
-
-    out = {
-        "timestamp_local": timestamp_local,
-        "timestamp_utc": timestamp_utc,
-        "waterlevel_cm": float(row["value_level"]),
-        "discharge_m3s": float(row["value_flow"]),
-        "status_level": status_level,
-        "status_flow": status_flow,
-    }
-    logger.info("Canonical row: %s", out)
-    return out
+    logger.info("Merged table rows=%d", len(merged))
+    return merged
 
 
+def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
+    """
+    Append all rows from 'table' whose timestamp_local is newer
+    than the max timestamp already in 'path'.
 
-def append_canonical_row(path: Path, row: dict) -> None:
-    """Append one canonical row to data/eisbach_15min.csv, skipping duplicates."""
-    # If the file exists, check the last timestamp_local
+    Returns the last appended row as a dict (for the JSON snapshot),
+    or None if nothing was appended.
+    """
     if path.exists():
         try:
-            # Read only the timestamp_local column
             existing = pd.read_csv(path, usecols=["timestamp_local"])
             if not existing.empty:
-                last_ts = existing["timestamp_local"].iloc[-1]
-                if last_ts == row["timestamp_local"]:
-                    logger.info(
-                        "Last row timestamp_local=%s matches new row; "
-                        "skipping append to avoid duplicate",
-                        last_ts,
-                    )
-                    return
+                last_ts_existing = pd.to_datetime(
+                    existing["timestamp_local"]
+                ).max()
+            else:
+                last_ts_existing = None
         except Exception as e:
-            logger.warning("Failed to read existing CSV for dedupe: %s", e)
+            logger.warning("Failed to read existing CSV for cutoff: %s", e)
+            last_ts_existing = None
+    else:
+        last_ts_existing = None
 
-    df_row = pd.DataFrame(
+    ts_new = pd.to_datetime(table["timestamp_local"])
+    if last_ts_existing is not None:
+        mask = ts_new > last_ts_existing
+        new_rows = table.loc[mask].copy()
+        logger.info(
+            "Existing last timestamp=%s; new rows to append=%d",
+            last_ts_existing,
+            len(new_rows),
+        )
+    else:
+        new_rows = table.copy()
+        logger.info(
+            "No existing data; appending all %d scraped rows", len(new_rows)
+        )
+
+    if new_rows.empty:
+        logger.info("No new 15‑minute intervals to append")
+        return None
+
+    # Add UTC timestamps
+    tz_local = pytz.timezone("Europe/Berlin")
+    ts_local = pd.to_datetime(new_rows["timestamp_local"])
+    ts_local = ts_local.dt.tz_localize(tz_local)
+    ts_utc = ts_local.dt.tz_convert(pytz.UTC)
+    new_rows["timestamp_utc"] = ts_utc.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Reorder columns to canonical schema
+    new_rows = new_rows[
         [
-            {
-                "timestamp_local": row["timestamp_local"],
-                "timestamp_utc": row["timestamp_utc"],
-                "waterlevel_cm": row["waterlevel_cm"],
-                "discharge_m3s": row["discharge_m3s"],
-                "status_level": row["status_level"],
-                "status_flow": row["status_flow"],
-            }
+            "timestamp_local",
+            "timestamp_utc",
+            "waterlevel_cm",
+            "discharge_m3s",
+            "status_level",
+            "status_flow",
         ]
-    )
+    ]
+
     mode = "a" if path.exists() else "w"
     logger.info(
-        "Writing canonical row to %s (mode=%s, header=%s)",
+        "Appending %d new rows to %s (mode=%s, header=%s)",
+        len(new_rows),
         path,
         mode,
         not path.exists(),
     )
-    df_row.to_csv(path, mode=mode, header=not path.exists(), index=False)
+    new_rows.to_csv(path, mode=mode, header=not path.exists(), index=False)
+
+    last_row = new_rows.iloc[-1].to_dict()
+    logger.info("Last appended row: %s", last_row)
+    return last_row
 
 
 def write_latest_snapshot(row: dict) -> None:
@@ -232,24 +269,32 @@ def write_latest_snapshot(row: dict) -> None:
         json.dump(row, f)
     os.replace(tmp, LATEST_JSON)
 
+# ----------------- Orchestration -----------------
 
 
 def run_once() -> None:
     """
     Single scrape‑and‑upload pass.
+
+    - Scrape full 15‑minute tables from HND.
+    - Append only new 15‑minute intervals to data/eisbach_15min.csv.
+    - Update JSON snapshot with the last appended row.
+    - Upload canonical CSV + JSON to GCS.
     """
     logger.info("=== run_once() starting ===")
-    row = fetch_eisbach_point()
+    table = fetch_eisbach_table()
+    last_row = append_new_rows(CANONICAL_CSV, table)
 
-    append_canonical_row(CANONICAL_CSV, row)
-    write_latest_snapshot(row)
+    if last_row is not None:
+        write_latest_snapshot(last_row)
+        csv_object = f"{GCS_PREFIX}/eisbach_15min.csv"
+        json_object = f"{GCS_PREFIX}/latest_snapshot.json"
+        upload_to_gcs(CANONICAL_CSV, csv_object)
+        upload_to_gcs(LATEST_JSON, json_object)
+    else:
+        logger.info("Skipping GCS upload because no new data was appended")
 
-    csv_object = f"{GCS_PREFIX}/eisbach_15min.csv"
-    json_object = f"{GCS_PREFIX}/latest_snapshot.json"
-
-    upload_to_gcs(CANONICAL_CSV, csv_object)
-    upload_to_gcs(LATEST_JSON, json_object)
-    logger.info("=== run_once() completed successfully ===")
+    logger.info("=== run_once() completed ===")
 
 
 def main_loop() -> None:
