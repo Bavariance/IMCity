@@ -113,7 +113,7 @@ def _fetch_full_table(methode: str) -> pd.DataFrame:
     params: dict[str, str] = {
         "methode": methode,
         "setdiskr": "15",
-        "days": "8",        # 24h window from HND side
+        "days": "12",        # 24h window from HND side
     }
     logger.info("Requesting HND table: methode=%s params=%s", methode, params)
     resp = requests.get(HND_BASE, params=params, timeout=15)
