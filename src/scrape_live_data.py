@@ -280,11 +280,13 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     # Drop duplicate timestamps, keep the latest values
     full_df = full_df.drop_duplicates(subset=["timestamp_local"], keep="last")
 
-    # Truncate to last 24 hours in local time
-    now_local = dt.datetime.now(TZ_LOCAL).replace(second=0, microsecond=0)
+    # Truncate to last 24 hours in *naive* local time
+    now_local = dt.datetime.now().replace(second=0, microsecond=0)
     cutoff_24h = now_local - dt.timedelta(hours=24)
+
     mask_24h = full_df["timestamp_local_dt"] >= cutoff_24h
     pruned_df = full_df.loc[mask_24h].copy()
+
 
      # Hard cap to last 96 points (15‑minute resolution over 24h)
     if len(pruned_df) > 96:
