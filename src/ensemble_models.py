@@ -53,20 +53,37 @@ def read_eisbach_csv(df, filename):
     #   lag_96 = 24 Stunden vorher
 
 
-    lags = [1, 4, 8, 96]
+    lags = [1, 2, 3, 4, 96]
 
     for lag in lags:
         df[f'lag_{lag}'] = df['wasserstand'].shift(lag)
 
-    # Zeilen mit NaN (am Anfang) entfernen
+    df['roll_mean_1h'] = df['wasserstand'].rolling(window=4).mean()  # 1 h
+    df['roll_mean_6h'] = df['wasserstand'].rolling(window=24).mean()  # 6 h
+    df['roll_std_6h'] = df['wasserstand'].rolling(window=24).std()  # 6 h Std-Abw.
+
+    # Zeit-Features (für Tages- / Wochenmuster)
+    df['hour'] = df.index.hour
+    df['dayofweek'] = df.index.dayofweek
+    df['month'] = df.index.month
+
+    # Durch Shift + Rolling entstehen NaNs am Anfang -> entfernen
     df = df.dropna()
 
-    feature_cols = [f'lag_{lag}' for lag in lags]
+    # =========================
+    # 5. Features (X) und Ziel (y)
+    # =========================
+
+    lag_cols = [f'lag_{lag}' for lag in lags]
+    extra_cols = ['roll_mean_1h', 'roll_mean_6h', 'roll_std_6h',
+                  'hour', 'dayofweek', 'month']
+
+    feature_cols = lag_cols + extra_cols
+
     X = df[feature_cols]
     y = df['wasserstand']
-
     # z.B. letzte 7 Tage als Test (7 * 24 * 4 Schritte)
-    test_size = 365 * 24 * 4
+    test_size = 7 * 24 * 4
     if len(df) <= test_size:
         raise ValueError("Zu wenige Daten für diesen Test-Split – test_size kleiner wählen.")
 
@@ -128,7 +145,7 @@ def build_ensemble_and_predict(X_test, rf, xgb_model, lgb_model):
     pred_xgb = xgb_model.predict(X_test)
     pred_lgb = lgb_model.predict(X_test)
     #Mean over all predictions is our final prediction
-    ensemble_pred = (pred_rf + pred_xgb + pred_lgb) / 3
+    ensemble_pred = (pred_xgb + pred_rf + pred_lgb)/3
     return ensemble_pred
 
 def evaluate_error(y_test, ensemble_pred):
