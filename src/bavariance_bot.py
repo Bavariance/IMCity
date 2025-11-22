@@ -4,16 +4,16 @@ from imc_types import OrderBook, Trade, Side, OrderRequest
 from prediction_model import PredictionModel
 
 
-PRODUCTS = [
-    '1_Eisbach',
-    '2_Eisbach_Call',
-    '3_Weather',
-    '4_Weather',
-    '5_Flights',
-    '6_Airport',
-    '7_ETF',
-    '8_ETF_Strangle'
-]
+PRODUCT_MODELS = {
+    "1_Eisbach": EisbachEnsemblePredictionModel("../data/waterlevel_beginn_bis_31.12.2024_ezw_0.csv"),
+    # "2_Eisbach_Call": None,
+    # "3_Weather": None,
+    # "4_Weather": None,
+    # "5_Flights": None,
+    # "6_Airport": None,
+    # "7_ETF": None,
+    # "8_ETF_Strangle": None,
+}
 
 
 class ProductManager:
@@ -21,10 +21,10 @@ class ProductManager:
     def __init__(self, product: str, prediction_model: PredictionModel):
         self.product = product
         self.prediction_model = prediction_model
-        self.realtime_flag = False
+        self.realtime_flag: bool = False
 
     @staticmethod
-    def separate_orders():
+    def separate_orders(orderbook):
         # Filter orders based on owner
         own_buy_orders = []
         others_buy_orders = []
@@ -49,8 +49,9 @@ class ProductManager:
         return own_buy_orders, others_buy_orders, own_sell_orders, others_sell_orders
 
     def handle_orderbook(self, orderbook: OrderBook):
-        own_buy_orders, others_buy_orders, own_sell_orders, others_sell_orders = self.separate_orders()
+        own_buy_orders, others_buy_orders, own_sell_orders, others_sell_orders = self.separate_orders(orderbook)
 
+        # TODO: Add timer?
         # TODO: Check if we have realtime data
 
         if realtime_flag:
@@ -58,6 +59,11 @@ class ProductManager:
 
             realtime_flag = False
         else:
+            # Get the best buy and sell offers
+            best_bid = others_buy_orders[0].price
+            best_ask = others_sell_orders[0].price
+
+            predicted_value = self.prediction_model.predict_next_time_step()
             # TODO: Implement old data prediction logic
             pass
 
@@ -67,8 +73,8 @@ class BavarianceBot(BaseBot):
         super.__init__(cmi_url, username, password)
 
         self.product_managers = {}
-        for product in PRODUCTS:
-            self.product_managers[product] = ProductManager(product)
+        for product, model in PRODUCT_MODELS.items():
+            self.product_managers[product] = ProductManager(product, model)
 
     # Handler for own trades
     def on_trades(self, trades: list[dict]):
