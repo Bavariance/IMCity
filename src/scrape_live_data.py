@@ -23,29 +23,31 @@ logger = logging.getLogger("eisbach.scraper")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 logger.info("PROJECT_ROOT set to %s", PROJECT_ROOT)
 
-# Canonical 15‑minute time-series lives in data/
+# Historic data (from GKD conversion) still lives in data/
 DATA_DIR = PROJECT_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-CANONICAL_CSV = DATA_DIR / "eisbach_15min.csv"
-logger.info("Canonical CSV path: %s", CANONICAL_CSV)
 
-# Live artifacts (small, for convenience) live in live_data/
+# Live 15‑minute time-series lives in live_data/
 LIVE_DIR = PROJECT_ROOT / "live_data"
 LIVE_DIR.mkdir(parents=True, exist_ok=True)
+CANONICAL_CSV = LIVE_DIR / "eisbach_15min.csv"
 LATEST_JSON = LIVE_DIR / "latest_snapshot.json"
+
+logger.info("Canonical CSV path: %s", CANONICAL_CSV)
 logger.info("Latest JSON path: %s", LATEST_JSON)
 
 # ----------------- GCS config -----------------
 
 GCS_BUCKET = os.environ.get("GCS_BUCKET")              # e.g. "imcity_live_data"
 GCS_PREFIX = os.environ.get("GCS_PREFIX", "live_data")  # folder inside bucket
-
 logger.info("GCS_BUCKET=%r, GCS_PREFIX=%r", GCS_BUCKET, GCS_PREFIX)
 
 _storage_client: storage.Client | None = None
 
 # Timezone used by HND / GKD (MEZ/MESZ)
 TZ_LOCAL = pytz.timezone("Europe/Berlin")
+
+# ----------------- GCS helpers -----------------
 
 
 def get_storage_client() -> storage.Client:
@@ -266,6 +268,16 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     logger.info("Last appended row: %s", last_row)
     return last_row
 
+# ----------------- Snapshot helper -----------------
+
+
+def write_latest_snapshot(row: dict) -> None:
+    """Write the latest observation as a small JSON file in live_data/."""
+    tmp = LATEST_JSON.with_suffix(".tmp")
+    logger.info("Writing latest snapshot to %s (tmp=%s)", LATEST_JSON, tmp)
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(row, f)
+    os.replace(tmp, LATEST_JSON)
 
 # ----------------- Orchestration -----------------
 
@@ -273,11 +285,6 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
 def run_once() -> None:
     """
     Single scrape‑and‑upload pass.
-
-    - Scrape full 15‑minute tables from HND.
-    - Append only new 15‑minute intervals to data/eisbach_15min.csv.
-    - Update JSON snapshot with the last appended row.
-    - Upload canonical CSV + JSON to GCS.
     """
     logger.info("=== run_once() starting ===")
     table = fetch_eisbach_table()
@@ -298,15 +305,11 @@ def run_once() -> None:
 def _sleep_until_next_quarter_hour():
     """
     Sleep until the next 15‑minute boundary + 1 second in Europe/Berlin.
-
-    Example: if now is 16:07, sleep until 16:15:01; if 16:16, sleep until 16:30:01.
     """
     now = dt.datetime.now(TZ_LOCAL)
-    # Determine next quarter: 0,15,30,45
     current_minute = now.minute
     next_quarter = ((current_minute // 15) + 1) * 15
     if next_quarter >= 60:
-        # roll over to next hour
         next_time = (now + dt.timedelta(hours=1)).replace(
             minute=0, second=1, microsecond=0
         )
@@ -332,7 +335,6 @@ def main_loop() -> None:
     Long‑lived loop: initial seed, then scrape at 15‑minute boundaries.
     """
     logger.info("Entering main_loop()")
-    # Initial run immediately on startup (seeds last 24h if CSV empty)
     run_once()
     while True:
         _sleep_until_next_quarter_hour()
