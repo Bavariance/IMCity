@@ -210,8 +210,8 @@ def fetch_eisbach_table() -> pd.DataFrame:
 
 def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     """
-    Append rows newer than existing data and keep only the last 24h
-    (hard cap: max 96 points for 15‑minute data).
+    Append rows newer than existing data and keep only the latest 1000 points
+    (15‑minute time series).
     """
     # Parse timestamps of the freshly scraped table
     ts_all = pd.to_datetime(table["timestamp_local"])
@@ -248,7 +248,7 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
 
     if new_rows.empty and not existing_df.empty:
         logger.info("No new 15‑minute intervals to append")
-        # Still enforce 24h/96pt pruning on existing data
+        # Still enforce 1000‑point pruning on existing data
         full_df = existing_df
     elif new_rows.empty and existing_df.empty:
         logger.info("No data at all to write")
@@ -272,7 +272,7 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
         else:
             full_df = pd.concat([existing_df, new_rows], ignore_index=True)
 
-    # --- Canonicalize, drop duplicates, and enforce 24h / 1000‑point window ---
+    # --- Canonicalize, drop duplicates, and enforce 1000‑point window ---
 
     full_df["timestamp_local_dt"] = pd.to_datetime(full_df["timestamp_local"])
     full_df = full_df.sort_values("timestamp_local_dt")
@@ -280,24 +280,15 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     # Drop duplicate timestamps, keep the latest values
     full_df = full_df.drop_duplicates(subset=["timestamp_local"], keep="last")
 
-    # Truncate to last 24 hours in *naive* local time
-    now_local = dt.datetime.now().replace(second=0, microsecond=0)
-    cutoff_24h = now_local - dt.timedelta(hours=24)
-
-    mask_24h = full_df["timestamp_local_dt"] >= cutoff_24h
-    pruned_df = full_df.loc[mask_24h].copy()
-
-
-     # Hard cap to last 100 points (15‑minute resolution over 24h)
+    # Keep only the last 1000 points (regardless of timespan)
+    pruned_df = full_df
     if len(pruned_df) > 1000:
-        pruned_df = pruned_df.tail(1000)
+        pruned_df = pruned_df.tail(1000)  # last N rows after sorting [web:89][web:92]
 
     # If nothing remains after pruning, avoid IndexError and bail out cleanly
     if pruned_df.empty:
-        logger.info(
-            "No data to write after truncation; live CSV empty"
-        )
-        # Still write an empty file with header if you want a canonical schema
+        logger.info("No data to write after truncation; live CSV empty")
+        # Still write an empty file with header for a canonical schema
         pruned_df = full_df.head(0)[
             [
                 "timestamp_local",
@@ -325,7 +316,7 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     ]
 
     logger.info(
-        "After truncation to last 24h / 96 points, rows in live CSV=%d",
+        "After truncation to last 1000 points, rows in live CSV=%d",
         len(pruned_df),
     )
 
@@ -333,6 +324,7 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     last_row = pruned_df.iloc[-1].to_dict()
     logger.info("Last row after truncation: %s", last_row)
     return last_row
+
 
 
 # ----------------- Snapshot helper -----------------
