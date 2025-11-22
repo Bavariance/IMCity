@@ -90,7 +90,7 @@ def read_eisbach_csv(df, filename):
     X_train, X_test = X.iloc[:-test_size], X.iloc[-test_size:]
     y_train, y_test = y.iloc[:-test_size], y.iloc[-test_size:]
 
-    return df, X_train, X_test, y_train, y_test
+    return df, X_train, X_test, y_train, y_test, feature_cols
 
 
 def train_models(X_train, Y_train, rf, xgb_model, lgb_model):
@@ -152,16 +152,53 @@ def evaluate_error(y_test, ensemble_pred):
     mse = mean_squared_error(y_test, ensemble_pred)
     print("Mean Squared Error (MSE):", mse)
 
+def output_comparison(y_test, ensemble_pred):
+    comparison = pd.DataFrame({
+        'wasserstand_real': y_test,
+        'ensemble_pred': ensemble_pred
+    }, index=y_test.index)
+    comparison["error"] = comparison["ensemble_pred"] - comparison["wasserstand_real"]
+    output_path = "wasserstand_predictions_vs_actual.csv"
+    comparison.to_csv(output_path, sep=';', decimal=',')
+
+
+def predict_next_time_step(df, rf, xgb_model, lgb_model, feature_cols):
+    # 10.1 Neuen Zeitstempel definieren
+    next_timestamp = df.index.max() + pd.Timedelta(minutes=15)
+
+    # 10.2 Hilfs-DataFrame mit letzter Zeile kopieren
+    last_row = df.iloc[[-1]].copy()
+    last_row.index = [next_timestamp]
+
+    # 10.3 Lags für den neuen Zeitpunkt bauen:
+    #     Für einen Step-ahead-Tree-Ansatz verwenden wir hier einfach
+    #     dieselben Feature-Werte wie in der letzten Zeile,
+    #     d.h. wir nehmen an, dass das Pattern der Lags/rolls sich
+    #     für den nächsten Schritt kaum ändert.
+    #     (Für 1-Step-Forward-Forecasting ist das ein üblicher pragmatischer Ansatz.)
+
+    X_next = last_row[feature_cols]
+
+    # 10.4 Ensemble-Vorhersage für genau diesen einen neuen Zeitpunkt
+
+    pred_rf_next = rf.predict(X_next)[0]
+    pred_xgb_next = xgb_model.predict(X_next)[0]
+    pred_lgb_next = lgb_model.predict(X_next)[0]
+
+    return (pred_rf_next + pred_xgb_next + pred_lgb_next) / 3.0
+
 
 
 def main():
     df = pd.DataFrame()
-    df, X_train, X_test, y_train, y_test = read_eisbach_csv(df, EISBACH_FILENAME)
+    df, X_train, X_test, y_train, y_test, feature_cols = read_eisbach_csv(df, EISBACH_FILENAME)
     rf, xgb_model, lgb_model = init_models()
     train_models(X_train, y_train, rf, xgb_model, lgb_model)
     ensemble_pred = build_ensemble_and_predict(X_test, rf, xgb_model, lgb_model)
     evaluate_error(y_test, ensemble_pred)
-
+    output_comparison(y_test, ensemble_pred)
+    prediction_next = predict_next_time_step(df,rf, xgb_model, lgb_model, feature_cols)
+    print("Next prediction is: ", prediction_next, " .")
 
 main()
 
