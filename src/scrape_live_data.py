@@ -139,23 +139,28 @@ def _fetch_table(methode: str) -> pd.DataFrame:
 def fetch_eisbach_point() -> dict:
     """
     Scrape latest Wasserstand (cm) and Abfluss (m³/s) from HND and return a canonical dict.
+    Ensures both series use the same local timestamp.
     """
     logger.info("Fetching latest Wasserstand/Abfluss from HND")
     level_df = _fetch_table("wasserstand")
     flow_df = _fetch_table("abfluss")
 
-    level_row = level_df.iloc[0]
-    flow_row = flow_df.iloc[0]
-    logger.info(
-        "Latest rows: level=%s, flow=%s",
-        level_row.to_dict(),
-        flow_row.to_dict(),
+    # Merge on the raw local timestamp to align both series
+    merged = pd.merge(
+        level_df,
+        flow_df,
+        on="timestamp_local_raw",
+        how="inner",
+        suffixes=("_level", "_flow"),
     )
+    if merged.empty:
+        raise RuntimeError("No common timestamps between level and flow tables")
+
+    row = merged.iloc[0]
+    logger.info("Merged latest row: %s", row.to_dict())
 
     tz_local = pytz.timezone("Europe/Berlin")
-    ts_local_parsed = pd.to_datetime(
-        level_row["timestamp_local_raw"], dayfirst=True
-    )
+    ts_local_parsed = pd.to_datetime(row["timestamp_local_raw"], dayfirst=True)
     ts_local = tz_local.localize(ts_local_parsed)
     ts_utc = ts_local.astimezone(pytz.UTC)
 
@@ -165,20 +170,38 @@ def fetch_eisbach_point() -> dict:
     status_level = "Rohdaten"
     status_flow = "Rohdaten"
 
-    row = {
+    out = {
         "timestamp_local": timestamp_local,
         "timestamp_utc": timestamp_utc,
-        "waterlevel_cm": float(level_row["value"]),
-        "discharge_m3s": float(flow_row["value"]),
+        "waterlevel_cm": float(row["value_level"]),
+        "discharge_m3s": float(row["value_flow"]),
         "status_level": status_level,
         "status_flow": status_flow,
     }
-    logger.info("Canonical row: %s", row)
-    return row
+    logger.info("Canonical row: %s", out)
+    return out
+
 
 
 def append_canonical_row(path: Path, row: dict) -> None:
-    """Append one canonical row to data/eisbach_15min.csv."""
+    """Append one canonical row to data/eisbach_15min.csv, skipping duplicates."""
+    # If the file exists, check the last timestamp_local
+    if path.exists():
+        try:
+            # Read only the timestamp_local column
+            existing = pd.read_csv(path, usecols=["timestamp_local"])
+            if not existing.empty:
+                last_ts = existing["timestamp_local"].iloc[-1]
+                if last_ts == row["timestamp_local"]:
+                    logger.info(
+                        "Last row timestamp_local=%s matches new row; "
+                        "skipping append to avoid duplicate",
+                        last_ts,
+                    )
+                    return
+        except Exception as e:
+            logger.warning("Failed to read existing CSV for dedupe: %s", e)
+
     df_row = pd.DataFrame(
         [
             {
@@ -208,6 +231,7 @@ def write_latest_snapshot(row: dict) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(row, f)
     os.replace(tmp, LATEST_JSON)
+
 
 
 def run_once() -> None:
