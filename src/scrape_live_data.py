@@ -272,7 +272,7 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
         else:
             full_df = pd.concat([existing_df, new_rows], ignore_index=True)
 
-    # --- Canonicalize, drop duplicates, and enforce 24h / 96‑point window ---
+    # --- Canonicalize, drop duplicates, and enforce 24h / 1000‑point window ---
 
     full_df["timestamp_local_dt"] = pd.to_datetime(full_df["timestamp_local"])
     full_df = full_df.sort_values("timestamp_local_dt")
@@ -288,9 +288,9 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     pruned_df = full_df.loc[mask_24h].copy()
 
 
-     # Hard cap to last 96 points (15‑minute resolution over 24h)
-    if len(pruned_df) > 700:
-        pruned_df = pruned_df.tail(700)
+     # Hard cap to last 100 points (15‑minute resolution over 24h)
+    if len(pruned_df) > 1000:
+        pruned_df = pruned_df.tail(1000)
 
     # If nothing remains after pruning, avoid IndexError and bail out cleanly
     if pruned_df.empty:
