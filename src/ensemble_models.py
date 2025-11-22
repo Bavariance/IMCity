@@ -66,7 +66,7 @@ def read_eisbach_csv(df, filename):
     y = df['wasserstand']
 
     # z.B. letzte 7 Tage als Test (7 * 24 * 4 Schritte)
-    test_size = 7 * 24 * 4
+    test_size = 365 * 24 * 4
     if len(df) <= test_size:
         raise ValueError("Zu wenige Daten für diesen Test-Split – test_size kleiner wählen.")
 
@@ -90,7 +90,7 @@ def train_models(X_train, Y_train, rf, xgb_model, lgb_model):
     lgb_model.fit(X_train, Y_train)
     print("Training for LightGBM complete.")
 
-def init_models(rf, xgb_model, lgb_model):
+def init_models():
     rf = RandomForestRegressor(
         n_estimators=200,
         random_state=42,
@@ -119,6 +119,8 @@ def init_models(rf, xgb_model, lgb_model):
         random_state=42
     )
 
+    return rf, xgb_model, lgb_model
+
 
 def build_ensemble_and_predict(X_test, rf, xgb_model, lgb_model):
     #We predict the next value for X_test (input containing data of last 30 days)
@@ -136,9 +138,9 @@ def evaluate_error(y_test, ensemble_pred):
 
 
 def main():
-    df, X_train, X_test, y_train, y_test = read_eisbach_csv(EISBACH_FILENAME)
-    rf, xgb_model, lgb_model = None
-    init_models(rf, xgb_model, lgb_model)
+    df = pd.DataFrame()
+    df, X_train, X_test, y_train, y_test = read_eisbach_csv(df, EISBACH_FILENAME)
+    rf, xgb_model, lgb_model = init_models()
     train_models(X_train, y_train, rf, xgb_model, lgb_model)
     ensemble_pred = build_ensemble_and_predict(X_test, rf, xgb_model, lgb_model)
     evaluate_error(y_test, ensemble_pred)
