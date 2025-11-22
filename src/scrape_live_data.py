@@ -267,15 +267,6 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     return last_row
 
 
-
-def write_latest_snapshot(row: dict) -> None:
-    """Write the latest observation as a small JSON file in live_data/."""
-    tmp = LATEST_JSON.with_suffix(".tmp")
-    logger.info("Writing latest snapshot to %s (tmp=%s)", LATEST_JSON, tmp)
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(row, f)
-    os.replace(tmp, LATEST_JSON)
-
 # ----------------- Orchestration -----------------
 
 
