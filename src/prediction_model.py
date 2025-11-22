@@ -81,6 +81,7 @@ class EisbachEnsemblePredictionModel(PredictionModel):
         self.df['hour'] = self.df.index.hour
         self.df['dayofweek'] = self.df.index.dayofweek
         self.df['month'] = self.df.index.month
+        self.df['minute'] = self.df.index.minute
 
         # Durch Shift + Rolling entstehen NaNs am Anfang -> entfernen
         self.df = self.df.dropna()
@@ -91,7 +92,7 @@ class EisbachEnsemblePredictionModel(PredictionModel):
 
         lag_cols = [f'lag_{lag}' for lag in lags]
         extra_cols = ['roll_mean_1h', 'roll_mean_6h', 'roll_std_6h',
-                      'hour', 'dayofweek', 'month']
+                      'hour', 'dayofweek', 'month', 'minute']
 
         self.feature_cols = lag_cols + extra_cols
 
@@ -205,6 +206,7 @@ class EisbachEnsembleFlowPredictionModel(PredictionModel):
         self.df['dayofweek'] = self.df.index.dayofweek
         self.df['month'] = self.df.index.month
 
+
         # Durch Shift + Rolling entstehen NaNs am Anfang -> entfernen
         self.df = self.df.dropna()
 
@@ -269,4 +271,9 @@ class EisbachEnsembleFlowPredictionModel(PredictionModel):
 
         return rf, xgb_model, lgb_model
 
+def main():
+    model = EisbachEnsemblePredictionModel("../data/waterlevel_beginn_bis_31.12.2024_ezw_0.csv")
+    prediction = model.predict_next_time_step()
+    print("prediction: ", prediction)
 
+main()

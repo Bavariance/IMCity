@@ -81,6 +81,7 @@ class EisbachEnsembleTrainer(ModelTrainer):
         self.df['hour'] = self.df.index.hour
         self.df['dayofweek'] = self.df.index.dayofweek
         self.df['month'] = self.df.index.month
+        self.df['minute'] = self.df.index.minute
 
         # Durch Shift + Rolling entstehen NaNs am Anfang -> entfernen
         self.df = self.df.dropna()
@@ -91,7 +92,7 @@ class EisbachEnsembleTrainer(ModelTrainer):
 
         lag_cols = [f'lag_{lag}' for lag in lags]
         extra_cols = ['roll_mean_1h', 'roll_mean_6h', 'roll_std_6h',
-                      'hour', 'dayofweek', 'month']
+                      'hour', 'dayofweek', 'month', 'minute']
 
         self.feature_cols = lag_cols + extra_cols
 
@@ -160,11 +161,11 @@ class EisbachEnsembleTrainer(ModelTrainer):
         ensemble_pred = (pred_xgb + pred_rf + pred_lgb) / 3
         return ensemble_pred
 
-    def evaluate_error(y_test, ensemble_pred):
+    def evaluate_error(self, y_test, ensemble_pred):
         mse = mean_squared_error(y_test, ensemble_pred)
         print("Mean Squared Error (MSE):", mse)
 
-    def output_comparison(y_test, ensemble_pred):
+    def output_comparison(self, y_test, ensemble_pred):
         comparison = pd.DataFrame({
             'wasserstand_real': y_test,
             'ensemble_pred': ensemble_pred
@@ -227,5 +228,7 @@ class EisbachEnsembleTrainer(ModelTrainer):
 def main():
     model = EisbachEnsembleTrainer("../data/waterlevel_beginn_bis_31.12.2024_ezw_0.csv")
     model.train_models()
-
+    model.save_models()
+    pred = model.build_ensemble_and_predict()
+    model.evaluate_error(model.y_test, pred)
 main()
