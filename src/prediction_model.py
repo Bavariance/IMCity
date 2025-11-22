@@ -137,13 +137,13 @@ class EisbachEnsemblePredictionModel(PredictionModel):
         return prediction
 
     def load_models(self):
-        with open(MODELS_DIR / "rf_model.pkl", "rb") as f:
+        with open(MODELS_DIR / "Level/rf_model.pkl", "rb") as f:
             rf = pickle.load(f)
 
-        with open(MODELS_DIR / "xgb_model.pkl", "rb") as f:
+        with open(MODELS_DIR / "Level/xgb_model.pkl", "rb") as f:
             xgb_model = pickle.load(f)
 
-        with open(MODELS_DIR / "lgb_model.pkl", "rb") as f:
+        with open(MODELS_DIR / "Level/lgb_model.pkl", "rb") as f:
             lgb_model = pickle.load(f)
 
         return rf, xgb_model, lgb_model
@@ -260,20 +260,18 @@ class EisbachEnsembleFlowPredictionModel(PredictionModel):
         return prediction
 
     def load_models(self):
-        with open(MODELS_DIR / "rf_model.pkl", "rb") as f:
+        with open(MODELS_DIR / "Flow/rf_model.pkl", "rb") as f:
             rf = pickle.load(f)
 
-        with open(MODELS_DIR / "xgb_model.pkl", "rb") as f:
+        with open(MODELS_DIR / "Flow/xgb_model.pkl", "rb") as f:
             xgb_model = pickle.load(f)
 
-        with open(MODELS_DIR / "lgb_model.pkl", "rb") as f:
+        with open(MODELS_DIR / "Flow/lgb_model.pkl", "rb") as f:
             lgb_model = pickle.load(f)
 
         return rf, xgb_model, lgb_model
 
 def main():
-    model = EisbachEnsemblePredictionModel("../data/waterlevel_beginn_bis_31.12.2024_ezw_0.csv")
+    model = EisbachEnsembleFlowPredictionModel("../data/waterlevel_beginn_bis_31.12.2024_ezw_0.csv")
     prediction = model.predict_next_time_step()
     print("prediction: ", prediction)
-
-main()

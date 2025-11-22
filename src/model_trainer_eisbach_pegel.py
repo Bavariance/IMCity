@@ -231,4 +231,3 @@ def main():
     model.save_models()
     pred = model.build_ensemble_and_predict()
     model.evaluate_error(model.y_test, pred)
-main()

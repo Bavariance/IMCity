@@ -1,9 +1,9 @@
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Tuple, Dict
 
 from base_bot import BaseBot
 from imc_types import OrderBook, Trade, Side, OrderRequest, Order
-from prediction_model import PredictionModel, EisbachEnsemblePredictionModel
+from prediction_model import PredictionModel, EisbachEnsemblePredictionModel, EisbachEnsembleFlowPredictionModel
 
 
 __all__ = ['BavarianceBot']  # Export only the bot class
@@ -31,7 +31,7 @@ class ProductContext:
 
 class ProductContextManager:
     def __init__(self, ctx: ProductContext):
-        self.ctx = context
+        self.ctx = ctx
 
     @staticmethod
     def _separate_orders(orderbook: OrderBook) -> Tuple[list, list, list, list]:
@@ -71,19 +71,24 @@ class ProductContextManager:
         val_2 = self.ctx.prediction_model_2.predict_next_time_step()
 
         # 2. Determine which product we are trading and select the correct formula
+       # if orderbook.product == "2_Eisbach_Call":
+        #    return
+
         if orderbook.product == self.ctx.product_name_1:
+            print("bruh")
             fair_value = self.ctx.formula_1(val_1, val_2)
             self._process_single_product(orderbook, bot, fair_value)
             
-        elif orderbook.product == self.ctx.product_name_2:
-            fair_value = self.ctx.formula_2(val_1, val_2)
-            self._process_single_product(orderbook, bot, fair_value)
+        #elif orderbook.product == self.ctx.product_name_2:
+         #   fair_value = self.ctx.formula_2(val_1, val_2)
+          #  self._process_single_product(orderbook, bot, fair_value)
 
     def _process_single_product(self, orderbook: OrderBook, bot: BaseBot, predicted_value: float):
         """
         Generic logic to cancel orders, check limits, and place new orders 
         based on a calculated predicted_value.
         """
+        print(f"Predicted value for {orderbook.product} = {predicted_value}")
         product = orderbook.product
         own_buy, others_buy, own_sell, others_sell = self._separate_orders(orderbook)
         
@@ -168,8 +173,8 @@ class BavarianceBot(BaseBot):
         # PAIR 1: Eisbach & Eisbach Call
         # ======================================================================
         # TODO: Ensure these paths are correct
-        model_eisbach_flow = EisbachEnsemblePredictionModel("../data/waterlevel_beginn_bis_31.12.2024_ezw_0.csv")
-        model_eisbach_level = EisbachEnsemblePredictionModel("../data/waterlevel_beginn_bis_31.12.2024_ezw_0.csv") # Example
+        model_eisbach_level= EisbachEnsemblePredictionModel("../data/waterlevel_beginn_bis_31.12.2024_ezw_0.csv")
+        model_eisbach_flow = EisbachEnsembleFlowPredictionModel("../data/flowrate_beginn_bis_31.12.2024_ezw_0.csv") # Example
 
         ctx_eisbach = ProductContext(
             product_name_1="1_Eisbach",

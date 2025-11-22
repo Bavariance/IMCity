@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict
 from functools import cached_property
 from typing import Any, Callable
+import time
 
 import requests
 
@@ -55,7 +56,7 @@ class BaseBot(ABC):
         self._cmi_url: str = cmi_url
         self.username: str = username
         self._password: str = password
-        self._sse_thread: SSEThread
+        self._sse_thread: SSEThread | None = None
         self._request_manager = RequestManager(1.0)
 
     @cached_property
@@ -68,7 +69,7 @@ class BaseBot(ABC):
         """
         Creates SSE thread to handle market events
         """
-        if self._sse_thread:
+        if self._sse_thread is not None:
             raise Exception(
                 "Bot already running. Please use the `stop()` method before trying again."
             )

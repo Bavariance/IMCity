@@ -200,25 +200,25 @@ class EisbachEnsembleFlowTrainer(ModelTrainer):
 
     def save_models(self):
         # Random Forest speichern
-        with open(MODELS_DIR / "rf_model.pkl", "wb") as f:
+        with open(MODELS_DIR / "Flow/rf_model.pkl", "wb") as f:
             pickle.dump(self.rf, f)
 
         # XGBoost speichern
-        with open(MODELS_DIR / "xgb_model.pkl", "wb") as f:
+        with open(MODELS_DIR / "Flow/xgb_model.pkl", "wb") as f:
             pickle.dump(self.xgb_model, f)
 
         # LightGBM speichern
-        with open(MODELS_DIR / "lgb_model.pkl", "wb") as f:
+        with open(MODELS_DIR / "Flow/lgb_model.pkl", "wb") as f:
             pickle.dump(self.lgb_model, f)
 
     def load_models(self):
-        with open(MODELS_DIR / "rf_model.pkl", "rb") as f:
+        with open(MODELS_DIR / "Flow/rf_model.pkl", "rb") as f:
             rf = pickle.load(f)
 
-        with open(MODELS_DIR / "xgb_model.pkl", "rb") as f:
+        with open(MODELS_DIR / "Flow/xgb_model.pkl", "rb") as f:
             xgb_model = pickle.load(f)
 
-        with open(MODELS_DIR / "lgb_model.pkl", "rb") as f:
+        with open(MODELS_DIR / "Flow/lgb_model.pkl", "rb") as f:
             lgb_model = pickle.load(f)
 
         return rf, xgb_model, lgb_model
@@ -227,5 +227,6 @@ class EisbachEnsembleFlowTrainer(ModelTrainer):
 def main():
     model = EisbachEnsembleFlowTrainer("../data/flowrate_beginn_bis_31.12.2024_ezw_0.csv")
     model.train_models()
+    model.save_models()
 
 main()

@@ -14,14 +14,6 @@ from settings import MODELS_DIR
 EISBACH_FILENAME = "../data/waterlevel_beginn_bis_31.12.2024_ezw_0.csv"
 
 
-class PredictionType(Enum):
-    FLIGHTS = 1
-    EISBACH = 2
-    WEATHER = 3
-    AIRPORT = 4
-    ETFS = 5
-
-
 #Reads the csv file filename and returns a dataframe with date and wasserstand
 def read_eisbach_csv(df, filename):
     df = pd.read_csv(
@@ -94,7 +86,6 @@ def read_eisbach_csv(df, filename):
 
     return df, X_train, X_test, y_train, y_test, feature_cols
 
-
 def train_models(X_train, Y_train, rf, xgb_model, lgb_model):
     # 1. Random Forest
     print("Starting training for Random Forest.")
@@ -140,7 +131,6 @@ def init_models():
 
     return rf, xgb_model, lgb_model
 
-
 def build_ensemble_and_predict(X_test, rf, xgb_model, lgb_model):
     #We predict the next value for X_test (input containing data of last 30 days)
     pred_rf = rf.predict(X_test)
@@ -162,7 +152,6 @@ def output_comparison(y_test, ensemble_pred):
     comparison["error"] = comparison["ensemble_pred"] - comparison["wasserstand_real"]
     output_path = "wasserstand_predictions_vs_actual.csv"
     comparison.to_csv(output_path, sep=';', decimal=',')
-
 
 def predict_next_time_step(df, rf, xgb_model, lgb_model, feature_cols):
     # 10.1 Neuen Zeitstempel definieren
@@ -201,7 +190,6 @@ def save_models(rf, xgb_model, lgb_model):
     # LightGBM speichern
     with open(MODELS_DIR/"lgb_model.pkl", "wb") as f:
         pickle.dump(lgb_model, f)
-
 
 def load_models():
     with open(MODELS_DIR/"rf_model.pkl", "rb") as f:
