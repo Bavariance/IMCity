@@ -113,7 +113,7 @@ def _fetch_full_table(methode: str) -> pd.DataFrame:
     params: dict[str, str] = {
         "methode": methode,
         "setdiskr": "15",
-        "days": "1",        # 24h window from HND side
+        "days": "8",        # 24h window from HND side
     }
     logger.info("Requesting HND table: methode=%s params=%s", methode, params)
     resp = requests.get(HND_BASE, params=params, timeout=15)
@@ -289,8 +289,8 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
 
 
      # Hard cap to last 96 points (15‑minute resolution over 24h)
-    if len(pruned_df) > 96:
-        pruned_df = pruned_df.tail(96)
+    if len(pruned_df) > 700:
+        pruned_df = pruned_df.tail(700)
 
     # If nothing remains after pruning, avoid IndexError and bail out cleanly
     if pruned_df.empty:
