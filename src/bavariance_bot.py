@@ -1,7 +1,10 @@
 from base_bot import BaseBot
 from imc_types import OrderBook, Trade, Side, OrderRequest
 
-from prediction_model import PredictionModel
+from prediction_model import PredictionModel, EisbachEnsemblePredictionModel
+
+
+__all__ = ['BavarianceBot']  # Export only the bot class
 
 
 PRODUCT_MODELS = {
@@ -16,6 +19,7 @@ PRODUCT_MODELS = {
 }
 
 
+POSITION_LIMIT = 200
 class ProductManager:
 
     def __init__(self, product: str, prediction_model: PredictionModel):
@@ -24,7 +28,7 @@ class ProductManager:
         self.realtime_flag: bool = False
 
     @staticmethod
-    def separate_orders(orderbook):
+    def _separate_orders(orderbook):
         # Filter orders based on owner
         own_buy_orders = []
         others_buy_orders = []
@@ -48,8 +52,12 @@ class ProductManager:
 
         return own_buy_orders, others_buy_orders, own_sell_orders, others_sell_orders
 
-    def handle_orderbook(self, orderbook: OrderBook):
-        own_buy_orders, others_buy_orders, own_sell_orders, others_sell_orders = self.separate_orders(orderbook)
+    def _get_position(self, bot: BaseBot) -> int:
+        positions = bot.request_positions() or {}
+        return positions.get(self.product, 0)
+
+    def handle_orderbook(self, orderbook: OrderBook, bot: BaseBot):
+        own_buy_orders, others_buy_orders, own_sell_orders, others_sell_orders = self._separate_orders(orderbook)
 
         # TODO: Add timer?
         # TODO: Check if we have realtime data
@@ -65,7 +73,114 @@ class ProductManager:
 
             predicted_value = self.prediction_model.predict_next_time_step()
             # TODO: Implement old data prediction logic
-            pass
+            current_position = self._get_position(bot)
+            tick = orderbook.tick_size
+
+            best_bid = orderbook.buy_orders[0].price if orderbook.buy_orders else None
+            best_ask = orderbook.sell_orders[0].price if orderbook.sell_orders else None
+
+            THRESHOLD = 2 * tick
+            ORDER_SIZE = 10  # must divide your limit nicely (e.g. 20 * 10 = 200)
+
+            # cancel existing own orders for this product
+            for o in own_buy_orders:
+                bot.cancel_order(self.product, o.price)
+            for o in own_sell_orders:
+                bot.cancel_order(self.product, o.price)
+
+            predicted_value = self.prediction_model.predict_next_time_step()
+
+            # helper to respect position limits
+            def can_buy(size: int) -> bool:
+                return current_position + size <= POSITION_LIMIT
+
+            def can_sell(size: int) -> bool:
+                return current_position - size >= -POSITION_LIMIT
+
+            # empty book: quote around prediction, respecting limits
+            if best_bid is None and best_ask is None:
+                bid_price = predicted_value - tick
+                ask_price = predicted_value + tick
+
+                if can_buy(ORDER_SIZE):
+                    buy_order = OrderRequest(
+                        product=self.product,
+                        price=bid_price,
+                        side=Side.BUY,
+                        volume=ORDER_SIZE,
+                    )
+                    bot.send_order(buy_order)
+
+                if can_sell(ORDER_SIZE):
+                    sell_order = OrderRequest(
+                        product=self.product,
+                        price=ask_price,
+                        side=Side.SELL,
+                        volume=ORDER_SIZE,
+                    )
+                    bot.send_order(sell_order)
+
+                return
+
+            # only asks exist: place bid below them, if room to buy
+            if best_bid is None and best_ask is not None:
+                bid_price = best_ask - 2 * tick
+
+                if can_buy(ORDER_SIZE):
+                    buy_order = OrderRequest(
+                        product=self.product,
+                        price=bid_price,
+                        side=Side.BUY,
+                        volume=ORDER_SIZE,
+                    )
+                    bot.send_order(buy_order)
+
+                return
+
+            # only bids exist: place ask above them, if room to sell
+            if best_ask is None and best_bid is not None:
+                ask_price = best_bid + 2 * tick
+
+                if can_sell(ORDER_SIZE):
+                    sell_order = OrderRequest(
+                        product=self.product,
+                        price=ask_price,
+                        side=Side.SELL,
+                        volume=ORDER_SIZE,
+                    )
+                    bot.send_order(sell_order)
+
+                return
+
+            # normal case: both sides exist
+            mid = (best_bid + best_ask) / 2
+            diff = predicted_value - mid
+
+            # bullish signal: want to get longer, but only if within +200
+            if diff > THRESHOLD and can_buy(ORDER_SIZE):
+                bid_price = mid - tick
+                buy_order = OrderRequest(
+                    product=self.product,
+                    price=bid_price,
+                    side=Side.BUY,
+                    volume=ORDER_SIZE,
+                )
+                bot.send_order(buy_order)
+                return
+
+            # bearish signal: want to get shorter, but only if within -200
+            if diff < -THRESHOLD and can_sell(ORDER_SIZE):
+                ask_price = mid + tick
+                sell_order = OrderRequest(
+                    product=self.product,
+                    price=ask_price,
+                    side=Side.SELL,
+                    volume=ORDER_SIZE,
+                )
+                bot.send_order(sell_order)
+                return
+
+            # inside threshold or no inventory room: stay flat (no new orders)
 
 
 class BavarianceBot(BaseBot):
