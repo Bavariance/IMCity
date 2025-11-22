@@ -1,5 +1,5 @@
 from base_bot import BaseBot
-from imc_types import OrderBook, Trade, Side, OrderRequest
+from imc_types import OrderBook, Trade, Side, OrderRequest, Order
 
 from prediction_model import PredictionModel, EisbachEnsemblePredictionModel
 
@@ -37,8 +37,7 @@ class ProductManager:
                 own_buy_orders.append(buy_order)
             else:
                 # Subtract own volume
-                buy_order.volume -= buy_order.own_volume
-                others_buy_orders.append(buy_order)
+                others_buy_orders.append(Order(price=buy_order.price, volume=buy_order.volume - buy_order.own_volume, own_volume=0))
 
         own_sell_orders = []
         others_sell_orders = []
@@ -47,8 +46,7 @@ class ProductManager:
                 own_buy_orders.append(sell_order)
             else:
                 # Subtract own volume
-                sell_order.volume -= sell_order.own_volume
-                others_buy_orders.append(sell_order)
+                others_buy_orders.append(Order(price=sell_order.price, volume=sell_order.volume - sell_order.own_volume, own_volume=0))
 
         return own_buy_orders, others_buy_orders, own_sell_orders, others_sell_orders
 
@@ -62,16 +60,11 @@ class ProductManager:
         # TODO: Add timer?
         # TODO: Check if we have realtime data
 
-        if realtime_flag:
+        if self.realtime_flag:
             # TODO: Implement new realtime data logic
 
-            realtime_flag = False
+            self.realtime_flag = False
         else:
-            # Get the best buy and sell offers
-            best_bid = others_buy_orders[0].price
-            best_ask = others_sell_orders[0].price
-
-            predicted_value = self.prediction_model.predict_next_time_step()
             # TODO: Implement old data prediction logic
             current_position = self._get_position(bot)
             tick = orderbook.tick_size
@@ -105,7 +98,7 @@ class ProductManager:
                 if can_buy(ORDER_SIZE):
                     buy_order = OrderRequest(
                         product=self.product,
-                        price=bid_price,
+                        price=round(bid_price),
                         side=Side.BUY,
                         volume=ORDER_SIZE,
                     )
@@ -114,7 +107,7 @@ class ProductManager:
                 if can_sell(ORDER_SIZE):
                     sell_order = OrderRequest(
                         product=self.product,
-                        price=ask_price,
+                        price=round(ask_price),
                         side=Side.SELL,
                         volume=ORDER_SIZE,
                     )
@@ -129,7 +122,7 @@ class ProductManager:
                 if can_buy(ORDER_SIZE):
                     buy_order = OrderRequest(
                         product=self.product,
-                        price=bid_price,
+                        price=round(bid_price),
                         side=Side.BUY,
                         volume=ORDER_SIZE,
                     )
@@ -144,7 +137,7 @@ class ProductManager:
                 if can_sell(ORDER_SIZE):
                     sell_order = OrderRequest(
                         product=self.product,
-                        price=ask_price,
+                        price=round(ask_price),
                         side=Side.SELL,
                         volume=ORDER_SIZE,
                     )
@@ -161,7 +154,7 @@ class ProductManager:
                 bid_price = mid - tick
                 buy_order = OrderRequest(
                     product=self.product,
-                    price=bid_price,
+                    price=round(bid_price),
                     side=Side.BUY,
                     volume=ORDER_SIZE,
                 )
@@ -173,7 +166,7 @@ class ProductManager:
                 ask_price = mid + tick
                 sell_order = OrderRequest(
                     product=self.product,
-                    price=ask_price,
+                    price=round(ask_price),
                     side=Side.SELL,
                     volume=ORDER_SIZE,
                 )
@@ -185,7 +178,7 @@ class ProductManager:
 
 class BavarianceBot(BaseBot):
     def __init__(self, cmi_url: str, username: str, password: str):
-        super.__init__(cmi_url, username, password)
+        super().__init__(cmi_url, username, password)
 
         self.product_managers = {}
         for product, model in PRODUCT_MODELS.items():
@@ -197,9 +190,9 @@ class BavarianceBot(BaseBot):
 
     # Handler for order book updates
     def on_orderbook(self, orderbook: OrderBook):
-        manager = self.product_managers.get(product)
+        manager = self.product_managers.get(orderbook.product)
         if manager is not None:
-            manager.handle_orderbook(orderbook)
+            manager.handle_orderbook(orderbook,self)
         else:
             # Product name error (KeyError), but this should never happen anyway
             pass
