@@ -201,25 +201,25 @@ class EisbachEnsembleTrainer(ModelTrainer):
 
     def save_models(self):
         # Random Forest speichern
-        with open(MODELS_DIR / "rf_model.pkl", "wb") as f:
+        with open(MODELS_DIR / "Level/rf_model.pkl", "wb") as f:
             pickle.dump(self.rf, f)
 
         # XGBoost speichern
-        with open(MODELS_DIR / "xgb_model.pkl", "wb") as f:
+        with open(MODELS_DIR / "Level/xgb_model.pkl", "wb") as f:
             pickle.dump(self.xgb_model, f)
 
         # LightGBM speichern
-        with open(MODELS_DIR / "lgb_model.pkl", "wb") as f:
+        with open(MODELS_DIR / "Level/lgb_model.pkl", "wb") as f:
             pickle.dump(self.lgb_model, f)
 
     def load_models(self):
-        with open(MODELS_DIR / "rf_model.pkl", "rb") as f:
+        with open(MODELS_DIR / "Level/rf_model.pkl", "rb") as f:
             rf = pickle.load(f)
 
-        with open(MODELS_DIR / "xgb_model.pkl", "rb") as f:
+        with open(MODELS_DIR / "Level/xgb_model.pkl", "rb") as f:
             xgb_model = pickle.load(f)
 
-        with open(MODELS_DIR / "lgb_model.pkl", "rb") as f:
+        with open(MODELS_DIR / "Level/lgb_model.pkl", "rb") as f:
             lgb_model = pickle.load(f)
 
         return rf, xgb_model, lgb_model
@@ -231,3 +231,4 @@ def main():
     model.save_models()
     pred = model.build_ensemble_and_predict()
     model.evaluate_error(model.y_test, pred)
+main()
