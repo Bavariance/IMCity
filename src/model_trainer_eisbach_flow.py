@@ -21,7 +21,7 @@ class ModelTrainer(ABC):
 
 # TODO: Implement models
 
-class EisbachEnsembleTrainer(ModelTrainer):
+class EisbachEnsembleFlowTrainer(ModelTrainer):
 
     def __init__(self, filename):
         self.EISBACH_FILENAME = filename
@@ -36,7 +36,7 @@ class EisbachEnsembleTrainer(ModelTrainer):
         self.read_eisbach_csv()
 
 
-    # Reads the csv file filename and returns a dataframe with date and wasserstand
+    # Reads the csv file filename and returns a dataframe with date and flow
     def read_eisbach_csv(self):
         self.df = pd.read_csv(
             self.EISBACH_FILENAME,
@@ -46,14 +46,14 @@ class EisbachEnsembleTrainer(ModelTrainer):
         # Spalten umbenennen
         self.df = self.df.rename(columns={
             'Datum': 'datetime',
-            'Wasserstand [cm]': 'wasserstand'
+            'Abfluss [m³/s]': 'abfluss'
         })
 
         # Datum/Zeit parsen
         self.df['datetime'] = pd.to_datetime(self.df['datetime'], format='%Y-%m-%d %H:%M')
 
         # Kommazahlen in float umwandeln (deutsches Komma)
-        self.df['wasserstand'] = self.df['wasserstand'].astype(str).str.replace(',', '.').astype(float)
+        self.df['abfluss'] = self.df['abfluss'].astype(str).str.replace(',', '.').astype(float)
 
         # Nach Zeit sortieren und als Index setzen
         self.df = self.df.sort_values('datetime').reset_index(drop=True)
@@ -71,11 +71,11 @@ class EisbachEnsembleTrainer(ModelTrainer):
         lags = [1, 2, 3, 4, 96]
 
         for lag in lags:
-            self.df[f'lag_{lag}'] = self.df['wasserstand'].shift(lag)
+            self.df[f'lag_{lag}'] = self.df['abfluss'].shift(lag)
 
-        self.df['roll_mean_1h'] = self.df['wasserstand'].rolling(window=4).mean()  # 1 h
-        self.df['roll_mean_6h'] = self.df['wasserstand'].rolling(window=24).mean()  # 6 h
-        self.df['roll_std_6h'] = self.df['wasserstand'].rolling(window=24).std()  # 6 h Std-Abw.
+        self.df['roll_mean_1h'] = self.df['abfluss'].rolling(window=4).mean()  # 1 h
+        self.df['roll_mean_6h'] = self.df['abfluss'].rolling(window=24).mean()  # 6 h
+        self.df['roll_std_6h'] = self.df['abfluss'].rolling(window=24).std()  # 6 h Std-Abw.
 
         # Zeit-Features (für Tages- / Wochenmuster)
         self.df['hour'] = self.df.index.hour
@@ -96,7 +96,7 @@ class EisbachEnsembleTrainer(ModelTrainer):
         self.feature_cols = lag_cols + extra_cols
 
         X = self.df[self.feature_cols]
-        y = self.df['wasserstand']
+        y = self.df['abfluss']
         # z.B. letzte 7 Tage als Test (7 * 24 * 4 Schritte)
         test_size = 7 * 24 * 4
         if len(self.df) <= test_size:
@@ -225,7 +225,7 @@ class EisbachEnsembleTrainer(ModelTrainer):
 
 
 def main():
-    model = EisbachEnsembleTrainer("../data/waterlevel_beginn_bis_31.12.2024_ezw_0.csv")
+    model = EisbachEnsembleFlowTrainer("../data/flowrate_beginn_bis_31.12.2024_ezw_0.csv")
     model.train_models()
 
 main()

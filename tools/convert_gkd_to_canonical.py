@@ -72,8 +72,8 @@ def add_utc_timestamp(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Adding UTC timestamps")
     tz = pytz.timezone("Europe/Berlin")
     ts_local = pd.to_datetime(df["timestamp_local"])
-    ts_local = tz.localize(ts_local)
-    ts_utc = ts_local.astimezone(pytz.UTC)
+    ts_local = ts_local.dt.tz_localize(tz)
+    ts_utc = ts_local.dt.tz_convert(pytz.UTC)
     df["timestamp_utc"] = ts_utc.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     return df
 
