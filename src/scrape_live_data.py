@@ -1,9 +1,8 @@
-# src/scrape_live_data.py
-
 import os
 import time
 import json
 import logging
+import datetime as dt
 from pathlib import Path
 
 import pandas as pd
@@ -36,7 +35,7 @@ LIVE_DIR.mkdir(parents=True, exist_ok=True)
 LATEST_JSON = LIVE_DIR / "latest_snapshot.json"
 logger.info("Latest JSON path: %s", LATEST_JSON)
 
-# ----------------- GCS config ------------------
+# ----------------- GCS config -----------------
 
 GCS_BUCKET = os.environ.get("GCS_BUCKET")              # e.g. "imcity_live_data"
 GCS_PREFIX = os.environ.get("GCS_PREFIX", "live_data")  # folder inside bucket
@@ -44,6 +43,9 @@ GCS_PREFIX = os.environ.get("GCS_PREFIX", "live_data")  # folder inside bucket
 logger.info("GCS_BUCKET=%r, GCS_PREFIX=%r", GCS_BUCKET, GCS_PREFIX)
 
 _storage_client: storage.Client | None = None
+
+# Timezone used by HND / GKD (MEZ/MESZ)
+TZ_LOCAL = pytz.timezone("Europe/Berlin")
 
 
 def get_storage_client() -> storage.Client:
@@ -91,6 +93,7 @@ def upload_to_gcs(local_path: Path, object_name: str) -> None:
     )
 
 # ----------------- Scraping logic --------------
+
 
 HND_BASE = (
     "https://www.hnd.bayern.de/pegel/isar/"
@@ -190,9 +193,12 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     Append all rows from 'table' whose timestamp_local is newer
     than the max timestamp already in 'path'.
 
-    Returns the last appended row as a dict (for the JSON snapshot),
-    or None if nothing was appended.
+    On first run (no existing CSV), only rows from the last 24 hours
+    in local time are written.
     """
+    ts_all = pd.to_datetime(table["timestamp_local"])
+
+    # Determine cutoff based on existing data (if any)
     if path.exists():
         try:
             existing = pd.read_csv(path, usecols=["timestamp_local"])
@@ -208,9 +214,9 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     else:
         last_ts_existing = None
 
-    ts_new = pd.to_datetime(table["timestamp_local"])
     if last_ts_existing is not None:
-        mask = ts_new > last_ts_existing
+        # Append anything strictly newer than last existing timestamp
+        mask = ts_all > last_ts_existing
         new_rows = table.loc[mask].copy()
         logger.info(
             "Existing last timestamp=%s; new rows to append=%d",
@@ -218,19 +224,21 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
             len(new_rows),
         )
     else:
-        new_rows = table.copy()
-        logger.info(
-            "No existing data; appending all %d scraped rows", len(new_rows)
-        )
+        # First run: only keep last 24 hours relative to *now* in local time
+        now_local = dt.datetime.now(TZ_LOCAL).replace(second=0, microsecond=0)
+        cutoff = now_local - dt.timedelta(days=1)
+        logger.info("No existing data; seeding from last 24h since %s", cutoff)
+        mask = ts_all >= cutoff
+        new_rows = table.loc[mask].copy()
+        logger.info("Rows in last 24h to append=%d", len(new_rows))
 
     if new_rows.empty:
         logger.info("No new 15‑minute intervals to append")
         return None
 
     # Add UTC timestamps
-    tz_local = pytz.timezone("Europe/Berlin")
     ts_local = pd.to_datetime(new_rows["timestamp_local"])
-    ts_local = ts_local.dt.tz_localize(tz_local)
+    ts_local = ts_local.dt.tz_localize(TZ_LOCAL)
     ts_utc = ts_local.dt.tz_convert(pytz.UTC)
     new_rows["timestamp_utc"] = ts_utc.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -297,15 +305,51 @@ def run_once() -> None:
     logger.info("=== run_once() completed ===")
 
 
+def _sleep_until_next_quarter_hour():
+    """
+    Sleep until the next 15‑minute boundary + 1 second in Europe/Berlin.
+
+    Example: if now is 16:07, sleep until 16:15:01; if 16:16, sleep until 16:30:01.
+    """
+    now = dt.datetime.now(TZ_LOCAL)
+    # Determine next quarter: 0,15,30,45
+    current_minute = now.minute
+    next_quarter = ((current_minute // 15) + 1) * 15
+    if next_quarter >= 60:
+        # roll over to next hour
+        next_time = (now + dt.timedelta(hours=1)).replace(
+            minute=0, second=1, microsecond=0
+        )
+    else:
+        next_time = now.replace(
+            minute=next_quarter, second=1, microsecond=0
+        )
+
+    sleep_seconds = (next_time - dt.datetime.now(TZ_LOCAL)).total_seconds()
+    if sleep_seconds < 0:
+        sleep_seconds = 1  # safety fallback
+
+    logger.info(
+        "Sleeping %.1f seconds until next run at local time %s",
+        sleep_seconds,
+        next_time,
+    )
+    time.sleep(sleep_seconds)
+
+
 def main_loop() -> None:
-    """Long‑lived loop: scrape + upload every 15 minutes."""
-    logger.info("Entering main_loop() with 15‑minute interval")
+    """
+    Long‑lived loop: initial seed, then scrape at 15‑minute boundaries.
+    """
+    logger.info("Entering main_loop()")
+    # Initial run immediately on startup (seeds last 24h if CSV empty)
+    run_once()
     while True:
+        _sleep_until_next_quarter_hour()
         try:
             run_once()
         except Exception as e:
             logger.exception("Error in run_once: %s", e)
-        time.sleep(15 * 60)
 
 
 if __name__ == "__main__":
