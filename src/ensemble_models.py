@@ -9,7 +9,6 @@ import lightgbm as lgb
 import numpy as np
 from sklearn.metrics import mean_squared_error
 
-X_train, X_test, Y_train, Y_test = pd.DataFrame()
 EISBACH_FILENAME = "../data/waterlevel_beginn_bis_31.12.2024_ezw_0.csv"
 
 
@@ -61,10 +60,6 @@ def read_eisbach_csv(df, filename):
 
     # Zeilen mit NaN (am Anfang) entfernen
     df = df.dropna()
-
-    test_size = 7 * 24 * 4
-    if len(df) <= test_size:
-        raise ValueError("Zu wenige Daten für diesen Test-Split – test_size kleiner wählen.")
 
     feature_cols = [f'lag_{lag}' for lag in lags]
     X = df[feature_cols]
@@ -140,16 +135,16 @@ def evaluate_error(y_test, ensemble_pred):
 
 
 
-if __name__ == "__main__":
+def main():
     df, X_train, X_test, y_train, y_test = read_eisbach_csv(EISBACH_FILENAME)
     rf, xgb_model, lgb_model = None
     init_models(rf, xgb_model, lgb_model)
-    train_models(X_train, Y_train, rf, xgb_model, lgb_model)
+    train_models(X_train, y_train, rf, xgb_model, lgb_model)
     ensemble_pred = build_ensemble_and_predict(X_test, rf, xgb_model, lgb_model)
     evaluate_error(y_test, ensemble_pred)
 
 
-
+main()
 
 
 
