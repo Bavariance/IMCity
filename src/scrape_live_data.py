@@ -193,8 +193,7 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     Append all rows from 'table' whose timestamp_local is newer
     than the max timestamp already in 'path'.
 
-    On first run (no existing CSV), only rows from the last 24 hours
-    in local time are written.
+    On first run (no existing CSV), the *entire* scraped table is written.
     """
     ts_all = pd.to_datetime(table["timestamp_local"])
 
@@ -224,13 +223,12 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
             len(new_rows),
         )
     else:
-        # First run: only keep last 24 hours relative to *now* in local time
-        now_local = dt.datetime.now(TZ_LOCAL).replace(second=0, microsecond=0)
-        cutoff = now_local - dt.timedelta(days=1)
-        logger.info("No existing data; seeding from last 24h since %s", cutoff)
-        mask = ts_all >= cutoff
-        new_rows = table.loc[mask].copy()
-        logger.info("Rows in last 24h to append=%d", len(new_rows))
+        # First run: write the full table as returned by HND
+        new_rows = table.copy()
+        logger.info(
+            "No existing data; seeding CSV with all %d scraped rows",
+            len(new_rows),
+        )
 
     if new_rows.empty:
         logger.info("No new 15‑minute intervals to append")
@@ -267,6 +265,7 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     last_row = new_rows.iloc[-1].to_dict()
     logger.info("Last appended row: %s", last_row)
     return last_row
+
 
 
 def write_latest_snapshot(row: dict) -> None:
