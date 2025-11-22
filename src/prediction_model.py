@@ -17,6 +17,9 @@ class PredictionModel(ABC):
     def predict_next_time_step(self):
         raise NotImplementedError
 
+    @abstractmethod
+    def predict_until_target(self, target_timestamp: pd.Timestamp):
+        raise NotImplementedError
 
 
 
@@ -106,6 +109,76 @@ class EisbachEnsemblePredictionModel(PredictionModel):
         self.X_train, self.X_test = X.iloc[:-test_size], X.iloc[-test_size:]
         self.y_train, self.y_test = y.iloc[:-test_size], y.iloc[-test_size:]
 
+    def predict_until_target(self, target_timestamp: pd.Timestamp) -> float:
+        """
+        Iterative Vorhersage des Wasserstands bis zum gegebenen Zielzeitpunkt.
+        Nutzt das trainierte Ensemble und aktualisiert die Feature-DF mit
+        eigenen Vorhersagen.
+        """
+        # CSV und Feature-DF laden
+        self.read_eisbach_csv()
+
+        current_last_ts = self.df.index.max()
+
+        if target_timestamp <= current_last_ts:
+            # Ziel liegt in der Vergangenheit -> einfach letzten echten Wert zurückgeben
+            return self.df.loc[target_timestamp, "wasserstand"] if target_timestamp in self.df.index else \
+            self.df["wasserstand"].iloc[-1]
+
+        df_future = self.df.copy()
+
+        while current_last_ts < target_timestamp:
+            next_ts = current_last_ts + pd.Timedelta(minutes=15)
+
+            # Basis: letzte Zeile kopieren
+            last_row = df_future.iloc[[-1]].copy()
+            last_row.index = [next_ts]
+
+            # Jetzt künstlich neue Lags/rolls konstruieren:
+            # 1) Den vorhergesagten Wert gleich setzen
+            X_next = last_row[self.feature_cols]
+
+            # Ensemble-Vorhersage
+            pred_rf_next = self.rf.predict(X_next)[0]
+            pred_xgb_next = self.xgb_model.predict(X_next)[0]
+            pred_lgb_next = self.lgb_model.predict(X_next)[0]
+            pred = (pred_rf_next + pred_xgb_next + pred_lgb_next) / 3.0
+
+            # 2) Neue Zeile mit prognostiziertem Wasserstand einfügen
+            new_row = last_row.copy()
+            new_row["wasserstand"] = pred
+
+            # Lags neu berechnen: für neue Zeile die echten Lags aus df_future holen
+            # (hier einfach: df_future um neue Zeile erweitern und Lags & Rolls neu berechnen)
+            df_future = pd.concat([df_future, new_row])
+            # Lags und Rolls neu bauen für df_future.tail(max_lag_window)
+            # zur Vereinfachung: komplette Prozedur nochmal anwenden:
+            # (performanter wäre ein inkrementelles Update)
+            lags = [1, 2, 3, 4, 96]
+            for lag in lags:
+                df_future[f'lag_{lag}'] = df_future['wasserstand'].shift(lag)
+
+            df_future['roll_mean_1h'] = df_future['wasserstand'].rolling(window=4).mean()
+            df_future['roll_mean_6h'] = df_future['wasserstand'].rolling(window=24).mean()
+            df_future['roll_std_6h'] = df_future['wasserstand'].rolling(window=24).std()
+
+            df_future['hour'] = df_future.index.hour
+            df_future['dayofweek'] = df_future.index.dayofweek
+            df_future['month'] = df_future.index.month
+            df_future['minute'] = df_future.index.minute
+
+            # NaNs am Anfang ignorieren, aber die letzte Zeile ist gültig:
+            df_future = df_future.dropna()
+
+            current_last_ts = df_future.index.max()
+
+        # Jetzt ist current_last_ts >= target_timestamp.
+        # Idealerweise genau gleich, sonst könntest du den nächstliegenden Step nehmen.
+        final_row = df_future.loc[target_timestamp] if target_timestamp in df_future.index else df_future.iloc[-1]
+        return float(final_row["wasserstand"])
+
+
+
     def predict_next_time_step(self):
         self.read_eisbach_csv()
 
@@ -160,6 +233,76 @@ class EisbachEnsembleFlowPredictionModel(PredictionModel):
         self.y_test = None
         self.last_predictions = []
         self.rf, self.xgb_model, self.lgb_model = self.load_models()
+
+    def predict_until_target(self, target_timestamp: pd.Timestamp) -> float:
+        """
+        Iterative Vorhersage des Wasserstands bis zum gegebenen Zielzeitpunkt.
+        Nutzt das trainierte Ensemble und aktualisiert die Feature-DF mit
+        eigenen Vorhersagen.
+        """
+        # CSV und Feature-DF laden
+        self.read_eisbach_csv()
+
+        current_last_ts = self.df.index.max()
+
+        if target_timestamp <= current_last_ts:
+            # Ziel liegt in der Vergangenheit -> einfach letzten echten Wert zurückgeben
+            return self.df.loc[target_timestamp, "wasserstand"] if target_timestamp in self.df.index else \
+            self.df["wasserstand"].iloc[-1]
+
+        df_future = self.df.copy()
+
+        while current_last_ts < target_timestamp:
+            next_ts = current_last_ts + pd.Timedelta(minutes=15)
+
+            # Basis: letzte Zeile kopieren
+            last_row = df_future.iloc[[-1]].copy()
+            last_row.index = [next_ts]
+
+            # Jetzt künstlich neue Lags/rolls konstruieren:
+            # 1) Den vorhergesagten Wert gleich setzen
+            X_next = last_row[self.feature_cols]
+
+            # Ensemble-Vorhersage
+            pred_rf_next = self.rf.predict(X_next)[0]
+            pred_xgb_next = self.xgb_model.predict(X_next)[0]
+            pred_lgb_next = self.lgb_model.predict(X_next)[0]
+            pred = (pred_rf_next + pred_xgb_next + pred_lgb_next) / 3.0
+
+            # 2) Neue Zeile mit prognostiziertem Wasserstand einfügen
+            new_row = last_row.copy()
+            new_row["wasserstand"] = pred
+
+            # Lags neu berechnen: für neue Zeile die echten Lags aus df_future holen
+            # (hier einfach: df_future um neue Zeile erweitern und Lags & Rolls neu berechnen)
+            df_future = pd.concat([df_future, new_row])
+            # Lags und Rolls neu bauen für df_future.tail(max_lag_window)
+            # zur Vereinfachung: komplette Prozedur nochmal anwenden:
+            # (performanter wäre ein inkrementelles Update)
+            lags = [1, 2, 3, 4, 96]
+            for lag in lags:
+                df_future[f'lag_{lag}'] = df_future['wasserstand'].shift(lag)
+
+            df_future['roll_mean_1h'] = df_future['wasserstand'].rolling(window=4).mean()
+            df_future['roll_mean_6h'] = df_future['wasserstand'].rolling(window=24).mean()
+            df_future['roll_std_6h'] = df_future['wasserstand'].rolling(window=24).std()
+
+            df_future['hour'] = df_future.index.hour
+            df_future['dayofweek'] = df_future.index.dayofweek
+            df_future['month'] = df_future.index.month
+            df_future['minute'] = df_future.index.minute
+
+            # NaNs am Anfang ignorieren, aber die letzte Zeile ist gültig:
+            df_future = df_future.dropna()
+
+            current_last_ts = df_future.index.max()
+
+        # Jetzt ist current_last_ts >= target_timestamp.
+        # Idealerweise genau gleich, sonst könntest du den nächstliegenden Step nehmen.
+        final_row = df_future.loc[target_timestamp] if target_timestamp in df_future.index else df_future.iloc[-1]
+        return float(final_row["wasserstand"])
+
+
 
     def read_eisbach_csv(self):
         self.df = pd.read_csv(

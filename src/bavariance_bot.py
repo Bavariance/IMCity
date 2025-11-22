@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Callable, Tuple, Dict
 
+import pandas as pd
+
 from base_bot import BaseBot
 from imc_types import OrderBook, Trade, Side, OrderRequest, Order
 from prediction_model import PredictionModel, EisbachEnsemblePredictionModel, EisbachEnsembleFlowPredictionModel
@@ -66,9 +68,10 @@ class ProductContextManager:
         """
         # 1. Get predictions from the underlying "Real Value" models
         # Note: Depending on your model logic, you might only want to step() 
-        # the model once per tick, not per product update. 
-        val_1 = self.ctx.prediction_model_1.predict_next_time_step()
-        val_2 = self.ctx.prediction_model_2.predict_next_time_step()
+        # the model once per tick, not per product update.
+        settel_time = pd.Timestamp("2025-11-23 10:00")
+        val_1 = self.ctx.prediction_model_1.predict_until_target(settel_time)
+        val_2 = self.ctx.prediction_model_2.predict_until_target(settel_time)
 
         # 2. Determine which product we are trading and select the correct formula
        # if orderbook.product == "2_Eisbach_Call":
@@ -78,6 +81,9 @@ class ProductContextManager:
             print("bruh")
             fair_value = self.ctx.formula_1(val_1, val_2)
             self._process_single_product(orderbook, bot, fair_value)
+
+
+            # Marktwert < fair_value | > fair_value
             
         #elif orderbook.product == self.ctx.product_name_2:
          #   fair_value = self.ctx.formula_2(val_1, val_2)
