@@ -107,7 +107,7 @@ def _fetch_full_table(methode: str) -> pd.DataFrame:
 
     Result columns:
         - timestamp_local: 'YYYY-MM-DD HH:MM'
-        - value: float (cm or m³/s)
+        - value: float (cm or m³/s) - FIXED decimal parsing
     """
     params: dict[str, str] = {"methode": methode, "setdiskr": "15"}
     logger.info("Requesting HND table: methode=%s params=%s", methode, params)
@@ -115,7 +115,9 @@ def _fetch_full_table(methode: str) -> pd.DataFrame:
     logger.info("HND response: status=%s url=%s", resp.status_code, resp.url)
     resp.raise_for_status()
 
-    tables = pd.read_html(resp.text, decimal=",")
+    # FIX: Wrap HTML in StringIO to silence FutureWarning
+    from io import StringIO
+    tables = pd.read_html(StringIO(resp.text), decimal=",")
     logger.info("Found %d tables for methode=%s", len(tables), methode)
     if not tables:
         raise RuntimeError(f"No tables found for methode={methode}")
@@ -125,32 +127,31 @@ def _fetch_full_table(methode: str) -> pd.DataFrame:
 
     # First two columns: timestamp (DD.MM.YYYY HH:MM) and value
     df = df.iloc[:, :2].copy()
-    df.columns = ["timestamp_local_raw", "value"]
+    df.columns = ["timestamp_local_raw", "value_raw"]
+
+    # FIX: Explicitly convert German decimals "24,3" → 24.3 float
+    df["value"] = df["value_raw"].str.replace(",", ".").astype(float)
 
     # Convert to canonical local timestamp format
     ts = pd.to_datetime(df["timestamp_local_raw"], dayfirst=True)
     df["timestamp_local"] = ts.dt.strftime("%Y-%m-%d %H:%M")
 
-    # --- FIX: ensure numeric and scale Abfluss to m³/s ---
-    if methode == "abfluss":
-        df["value"] = pd.to_numeric(df["value"], errors="coerce") / 10.0
-    else:
-        df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    # -----------------------------------------------------
-
-    # Keep only canonical timestamp + value
+    # Keep only canonical timestamp + value (drop raw columns)
     df = df[["timestamp_local", "value"]]
 
     # HND lists newest first; sort ascending so we can append naturally
     df = df.sort_values("timestamp_local").reset_index(drop=True)
     logger.info(
-        "Fetched %d rows for %s; oldest=%s newest=%s",
+        "Fetched %d rows for %s; oldest=%s newest=%s (values: %.1f...%.1f)",
         len(df),
         methode,
         df["timestamp_local"].iloc[0],
         df["timestamp_local"].iloc[-1],
+        df["value"].iloc[0],
+        df["value"].iloc[-1],
     )
     return df
+
 
 
 
@@ -194,73 +195,85 @@ def fetch_eisbach_table() -> pd.DataFrame:
     return merged
 
 
-ddef append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
+def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     """
-    Merge 'table' into the live CSV and keep only the last 24 hours.
-
-    - New rows are those with timestamp_local newer than the last existing one.
-    - After appending, the file is truncated to the last 24h in local time.
+    Append rows newer than existing data OR last 24h (whichever is shorter).
+    Keeps CSV to recent 24h max.
     """
     ts_all = pd.to_datetime(table["timestamp_local"])
+    
+    # NEW: Always truncate to last 24 hours from NOW
+    cutoff_24h = dt.datetime.now(TZ_LOCAL) - dt.timedelta(hours=24)
+    cutoff_24h = pd.to_datetime(cutoff_24h.strftime("%Y-%m-%d %H:%M"))
+    mask_24h = ts_all >= cutoff_24h
+    table_recent = table.loc[mask_24h].copy()
+    logger.info(
+        "Truncated table to last 24h: %d/%d rows (cutoff=%s)",
+        len(table_recent), len(table), cutoff_24h
+    )
 
     # Determine cutoff based on existing data (if any)
     if path.exists():
         try:
-            existing = pd.read_csv(path)
+            existing = pd.read_csv(path, usecols=["timestamp_local"])
             if not existing.empty:
-                last_ts_existing = pd.to_datetime(
-                    existing["timestamp_local"]
-                ).max()
+                last_ts_existing = pd.to_datetime(existing["timestamp_local"]).max()
+                # Use the LATER of 24h cutoff or existing data
+                cutoff = max(cutoff_24h, last_ts_existing)
             else:
-                last_ts_existing = None
+                cutoff = cutoff_24h
         except Exception as e:
             logger.warning("Failed to read existing CSV for cutoff: %s", e)
-            existing = pd.DataFrame()
-            last_ts_existing = None
+            cutoff = cutoff_24h
     else:
-        existing = pd.DataFrame()
-        last_ts_existing = None
+        cutoff = cutoff_24h
 
-    if last_ts_existing is not None:
-        mask = ts_all > last_ts_existing
-        new_rows = table.loc[mask].copy()
-        logger.info(
-            "Existing last timestamp=%s; new rows to append=%d",
-            last_ts_existing,
-            len(new_rows),
-        )
-    else:
-        new_rows = table.copy()
-        logger.info(
-            "No existing data; seeding CSV with all %d scraped rows",
-            len(new_rows),
-        )
+    # Append anything strictly newer than cutoff
+    mask_new = pd.to_datetime(table_recent["timestamp_local"]) > cutoff
+    new_rows = table_recent.loc[mask_new].copy()
+    logger.info(
+        "Cutoff=%s; new rows to append=%d (from %d recent rows)",
+        cutoff,
+        len(new_rows),
+        len(table_recent),
+    )
 
-    if new_rows.empty and not existing.empty:
+    if new_rows.empty:
         logger.info("No new 15‑minute intervals to append")
-        # Still truncate to 24h based on existing data
-        combined = existing
-    else:
-        # Add UTC timestamps to the new rows
-        ts_local = pd.to_datetime(new_rows["timestamp_local"])
-        ts_local = ts_local.dt.tz_localize(TZ_LOCAL)
-        ts_utc = ts_local.dt.tz_convert(pytz.UTC)
-        new_rows["timestamp_utc"] = ts_utc.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return None
 
-        # Map columns to canonical names
-        new_rows = new_rows[
-            [
-                "timestamp_local",
-                "timestamp_utc",
-                "waterlevel_cm",
-                "discharge_m3s",
-                "status_level",
-                "status_flow",
-            ]
+    # Add UTC timestamps
+    ts_local = pd.to_datetime(new_rows["timestamp_local"])
+    ts_local = ts_local.dt.tz_localize(TZ_LOCAL)
+    ts_utc = ts_local.dt.tz_convert(pytz.UTC)
+    new_rows["timestamp_utc"] = ts_utc.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Reorder columns to canonical schema
+    new_rows = new_rows[
+        [
+            "timestamp_local",
+            "timestamp_utc",
+            "waterlevel_cm",
+            "discharge_m3s",
+            "status_level",
+            "status_flow",
         ]
+    ]
 
-        # Combine with existing (if any)
-        combined = pd.concat([existing, new_rows], ignore_index=True)
+    mode = "a" if path.exists() else "w"
+    logger.info(
+        "Appending %d new rows to %s (mode=%s, header=%s)",
+        len(new_rows),
+        path,
+        mode,
+        not path.exists(),
+    )
+    new_rows.to_csv(path, mode=mode, header=not path.exists(), index=False)
+
+    last_row = new_rows.iloc[-1].to_dict()
+    logger.info("Last appended row: %s", last_row)
+    return last_row
+
 
     # Drop duplicate timestamps, keeping the latest values
     if not combined.empty:
