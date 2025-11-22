@@ -17,16 +17,46 @@ from imc_types import (
 from sse_thread import SSEThread, STANDARD_HEADERS
 
 
+class RequestManager:
+    # Class to limit the rate of the API calls
+
+    def __init__(self, rate_limit: float = 1.0):
+        self._last_call = 0
+        self.rate_limit = rate_limit
+
+    def _throttle(self):
+        # Blocking until we are able to send a request
+        now = time.time()
+        elapsed = now - self._last_call
+        if elapsed < self.rate_limit:
+            time.sleep(self.rate_limit - elapsed)
+        self._last_call = time.time()
+
+    def get(self, *args, **kwargs):
+        self._throttle()
+        return requests.get(*args, **kwargs)
+
+    def post(self, *args, **kwargs):
+        self._throttle()
+        return requests.post(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        self._throttle()
+        return requests.delete(*args, **kwargs)
+
+    def put(self, *args, **kwargs):
+        self._throttle()
+        return requests.put(*args, **kwargs)
+
+
 class BaseBot(ABC):
-    username: str
-    _password: str
-    _cmi_url: str
-    _sse_thread: SSEThread = None
 
     def __init__(self, cmi_url: str, username: str, password: str):
-        self._cmi_url = cmi_url
-        self.username = username
-        self._password = password
+        self._cmi_url: str = cmi_url
+        self.username: str = username
+        self._password: str = password
+        self._sse_thread: SSEThread
+        self._request_manager = RequestManager(1.0)
 
     @cached_property
     def auth_token(self):
@@ -78,7 +108,7 @@ class BaseBot(ABC):
     def send_order(self, order_request: OrderRequest) -> OrderResponse | None:
         payload = asdict(order_request)
         url = f"{self._cmi_url}/api/order"
-        response = requests.post(url, json=payload, headers=self._get_headers())
+        response = self._request_manager.post(url, json=payload, headers=self._get_headers())
         if response.status_code == 200:
             return OrderResponse(**response.json())
         else:
@@ -108,7 +138,7 @@ class BaseBot(ABC):
 
     def request_all_orders(self) -> list[dict] | None:
         url = f"{self._cmi_url}/api/order/current-user"
-        response = requests.get(url, headers=self._get_headers())
+        response = self._request_manager.get(url, headers=self._get_headers())
         if response.status_code == 200:
             return response.json()
         else:
@@ -116,7 +146,7 @@ class BaseBot(ABC):
 
     def cancel_order_by_id(self, order_id: str) -> dict | None:
         url = f"{self._cmi_url}/api/order/{order_id}"
-        response = requests.delete(url, headers=self._get_headers())
+        response = self._request_manager.delete(url, headers=self._get_headers())
         if response.status_code == 200:
             return response.json()
 
@@ -124,7 +154,7 @@ class BaseBot(ABC):
 
     def cancel_order(self, product: str, price: float) -> dict | None:
         url = f"{self._cmi_url}/api/order?product={product}&price={price}"
-        response = requests.delete(url, headers=self._get_headers())
+        response = self._request_manager.delete(url, headers=self._get_headers())
         if response.status_code == 200:
             return response.json()
         else:
@@ -133,13 +163,13 @@ class BaseBot(ABC):
     def cancel_all_orders(self) -> None:
         for order in self.request_all_orders():
             url = f"{self._cmi_url}/api/order/{order['id']}"
-            response = requests.delete(url, headers=self._get_headers())
+            response = self._request_manager.delete(url, headers=self._get_headers())
             if response.status_code != 200:
                 print(f"Failed to cancel order: {response.content}")
 
     def request_all_products(self) -> list[Product] | None:
         url = f"{self._cmi_url}/api/product"
-        response = requests.get(url, headers=self._get_headers())
+        response = self._request_manager.get(url, headers=self._get_headers())
         if response.status_code == 200:
             return list(map(lambda prod: Product(**prod), json.loads(response.text)))
         else:
@@ -147,7 +177,7 @@ class BaseBot(ABC):
 
     def request_positions(self) -> dict[str, int] | None:
         url = f"{self._cmi_url}/api/position/current-user"
-        response = requests.get(url, headers=self._get_headers())
+        response = self._request_manager.get(url, headers=self._get_headers())
         if response.status_code == 200:
             return {
                 position["product"]: position["volume"] for position in response.json()
@@ -157,7 +187,7 @@ class BaseBot(ABC):
 
     def request_net_positions(self) -> dict[str, int] | None:
         url = f"{self._cmi_url}/api/position/current-user"
-        response = requests.get(url, headers=self._get_headers())
+        response = self._request_manager.get(url, headers=self._get_headers())
         if response.status_code == 200:
             return {
                 position["product"]: position["netPosition"]
@@ -170,7 +200,7 @@ class BaseBot(ABC):
         auth = {"username": self.username, "password": self._password}
         print(auth)
         url = f"{self._cmi_url}/api/user/authenticate"
-        response = requests.post(url, headers=STANDARD_HEADERS, json=auth)
+        response = self._request_manager.post(url, headers=STANDARD_HEADERS, json=auth)
         response.raise_for_status()
         print(response.headers)
 
