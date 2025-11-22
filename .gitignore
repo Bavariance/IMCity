@@ -4,3 +4,6 @@ venv/
 # Bytecode
 __pycache__/
 *.pyc
+
+# Environment variables
+.env
