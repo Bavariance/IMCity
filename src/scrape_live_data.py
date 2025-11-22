@@ -23,11 +23,7 @@ logger = logging.getLogger("eisbach.scraper")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 logger.info("PROJECT_ROOT set to %s", PROJECT_ROOT)
 
-# Historic data (from GKD conversion) still lives in data/
-DATA_DIR = PROJECT_ROOT / "data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-# Live 15‑minute time-series lives in live_data/
+# Canonical 15‑minute time-series lives in live_data/
 LIVE_DIR = PROJECT_ROOT / "live_data"
 LIVE_DIR.mkdir(parents=True, exist_ok=True)
 CANONICAL_CSV = LIVE_DIR / "eisbach_15min.csv"
@@ -119,7 +115,8 @@ def _fetch_full_table(methode: str) -> pd.DataFrame:
     logger.info("HND response: status=%s url=%s", resp.status_code, resp.url)
     resp.raise_for_status()
 
-    tables = pd.read_html(resp.text, decimal=",")
+    # thousands="." helps if values become large (e.g. 1.234,56)
+    tables = pd.read_html(resp.text, decimal=",", thousands=".")
     logger.info("Found %d tables for methode=%s", len(tables), methode)
     if not tables:
         raise RuntimeError(f"No tables found for methode={methode}")
@@ -130,6 +127,11 @@ def _fetch_full_table(methode: str) -> pd.DataFrame:
     # First two columns: timestamp (DD.MM.YYYY HH:MM) and value
     df = df.iloc[:, :2].copy()
     df.columns = ["timestamp_local_raw", "value"]
+
+    # Force value to float to avoid object/int truncation
+    # Replace any remaining dots or weird chars if pandas missed them (safety)
+    # But usually read_html(decimal=',') is enough.
+    df["value"] = df["value"].astype(float)
 
     # Convert to canonical local timestamp format
     ts = pd.to_datetime(df["timestamp_local_raw"], dayfirst=True)
@@ -192,32 +194,28 @@ def fetch_eisbach_table() -> pd.DataFrame:
 
 def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
     """
-    Append all rows from 'table' whose timestamp_local is newer
-    than the max timestamp already in 'path'.
-
-    On first run (no existing CSV), the *entire* scraped table is written.
+    Append new rows from 'table' to 'path'.
+    Then TRUNCATE 'path' to only keep the last 24 hours of data.
     """
-    ts_all = pd.to_datetime(table["timestamp_local"])
+    ts_new = pd.to_datetime(table["timestamp_local"])
 
-    # Determine cutoff based on existing data (if any)
+    # 1. Load existing data if any
     if path.exists():
         try:
-            existing = pd.read_csv(path, usecols=["timestamp_local"])
-            if not existing.empty:
-                last_ts_existing = pd.to_datetime(
-                    existing["timestamp_local"]
-                ).max()
-            else:
-                last_ts_existing = None
+            existing_df = pd.read_csv(path)
+            existing_ts = pd.to_datetime(existing_df["timestamp_local"])
+            last_ts_existing = existing_ts.max()
         except Exception as e:
-            logger.warning("Failed to read existing CSV for cutoff: %s", e)
+            logger.warning("Failed to read existing CSV: %s", e)
+            existing_df = pd.DataFrame()
             last_ts_existing = None
     else:
+        existing_df = pd.DataFrame()
         last_ts_existing = None
 
+    # 2. Identify new rows
     if last_ts_existing is not None:
-        # Append anything strictly newer than last existing timestamp
-        mask = ts_all > last_ts_existing
+        mask = ts_new > last_ts_existing
         new_rows = table.loc[mask].copy()
         logger.info(
             "Existing last timestamp=%s; new rows to append=%d",
@@ -225,48 +223,73 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
             len(new_rows),
         )
     else:
-        # First run: write the full table as returned by HND
         new_rows = table.copy()
         logger.info(
-            "No existing data; seeding CSV with all %d scraped rows",
+            "No existing data; seeding with %d rows",
             len(new_rows),
         )
 
-    if new_rows.empty:
-        logger.info("No new 15‑minute intervals to append")
+    if new_rows.empty and not existing_df.empty:
+        logger.info("No new 15‑minute intervals found.")
+        # Even if no new rows, we might need to prune old ones?
+        # But usually we only prune when we append. Let's prune anyway.
+        full_df = existing_df
+        # We won't return a 'last_row' update if nothing changed at the head
+        # But to be safe let's just return None here to skip upload
         return None
 
-    # Add UTC timestamps
-    ts_local = pd.to_datetime(new_rows["timestamp_local"])
-    ts_local = ts_local.dt.tz_localize(TZ_LOCAL)
-    ts_utc = ts_local.dt.tz_convert(pytz.UTC)
-    new_rows["timestamp_utc"] = ts_utc.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # 3. Add UTC to new rows
+    if not new_rows.empty:
+        ts_local = pd.to_datetime(new_rows["timestamp_local"])
+        ts_local = ts_local.dt.tz_localize(TZ_LOCAL)
+        ts_utc = ts_local.dt.tz_convert(pytz.UTC)
+        new_rows["timestamp_utc"] = ts_utc.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Reorder columns to canonical schema
-    new_rows = new_rows[
-        [
-            "timestamp_local",
-            "timestamp_utc",
-            "waterlevel_cm",
-            "discharge_m3s",
-            "status_level",
-            "status_flow",
-        ]
-    ]
+        # Fill missing columns if any
+        new_rows = new_rows.reindex(
+            columns=[
+                "timestamp_local",
+                "timestamp_utc",
+                "waterlevel_cm",
+                "discharge_m3s",
+                "status_level",
+                "status_flow",
+            ]
+        )
 
-    mode = "a" if path.exists() else "w"
+    # 4. Combine and Truncate to last 24 hours
+    full_df = pd.concat([existing_df, new_rows], ignore_index=True)
+    
+    # Sort just in case
+    full_df.sort_values("timestamp_local", inplace=True)
+    
+    # Calculate cutoff: now (local) - 24 hours
+    now_local = dt.datetime.now(TZ_LOCAL)
+    cutoff = now_local - dt.timedelta(hours=24)
+    cutoff_naive = cutoff.replace(tzinfo=None) # since timestamp_local in DF is string/naive-like
+
+    # We need to convert column to datetime for comparison
+    temp_ts = pd.to_datetime(full_df["timestamp_local"])
+    
+    # Filter
+    # Note: 'temp_ts' is naive (from string), 'cutoff_naive' is naive. Safe to compare.
+    mask_keep = temp_ts >= cutoff_naive
+    pruned_df = full_df.loc[mask_keep].copy()
+
+    rows_removed = len(full_df) - len(pruned_df)
     logger.info(
-        "Appending %d new rows to %s (mode=%s, header=%s)",
-        len(new_rows),
-        path,
-        mode,
-        not path.exists(),
+        "Pruning data older than %s (local). Removed %d rows, keeping %d.",
+        cutoff_naive, rows_removed, len(pruned_df)
     )
-    new_rows.to_csv(path, mode=mode, header=not path.exists(), index=False)
 
-    last_row = new_rows.iloc[-1].to_dict()
-    logger.info("Last appended row: %s", last_row)
+    # 5. Write back
+    pruned_df.to_csv(path, index=False)
+    logger.info("Wrote updated table to %s", path)
+
+    last_row = pruned_df.iloc[-1].to_dict()
+    logger.info("Last row in file: %s", last_row)
     return last_row
+
 
 # ----------------- Snapshot helper -----------------
 
@@ -274,7 +297,7 @@ def append_new_rows(path: Path, table: pd.DataFrame) -> dict | None:
 def write_latest_snapshot(row: dict) -> None:
     """Write the latest observation as a small JSON file in live_data/."""
     tmp = LATEST_JSON.with_suffix(".tmp")
-    logger.info("Writing latest snapshot to %s (tmp=%s)", LATEST_JSON, tmp)
+    logger.info("Writing latest snapshot to %s", LATEST_JSON)
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(row, f)
     os.replace(tmp, LATEST_JSON)
@@ -288,8 +311,11 @@ def run_once() -> None:
     """
     logger.info("=== run_once() starting ===")
     table = fetch_eisbach_table()
+    
+    # This function now handles loading, merging, and pruning to 24h
     last_row = append_new_rows(CANONICAL_CSV, table)
 
+    # If append_new_rows returned a row, it means the file was updated (or seeded)
     if last_row is not None:
         write_latest_snapshot(last_row)
         csv_object = f"{GCS_PREFIX}/eisbach_15min.csv"
@@ -297,7 +323,7 @@ def run_once() -> None:
         upload_to_gcs(CANONICAL_CSV, csv_object)
         upload_to_gcs(LATEST_JSON, json_object)
     else:
-        logger.info("Skipping GCS upload because no new data was appended")
+        logger.info("No new data appended; skipping upload.")
 
     logger.info("=== run_once() completed ===")
 
