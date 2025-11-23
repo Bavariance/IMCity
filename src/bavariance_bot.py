@@ -15,14 +15,14 @@ logger = logging.getLogger(__name__)
 POSITION_LIMIT = 300
 
 # Extra ticks to add on all ASK (sell) quotes to make sells more aggressive (higher prices)
-ASK_PREMIUM_TICKS = 3  # main sell edge in ticks
+ASK_PREMIUM_TICKS = 1  # main sell edge in ticks
 
 # Inventory-hedging parameters
 BUY_EDGE_TICKS = 3                 # distance from mid / fair for hedge buys
 SELL_EDGE_TICKS = ASK_PREMIUM_TICKS  # distance from mid / fair for main sells
 
 HEDGE_START_SHORT = -int(0.5 * POSITION_LIMIT)  # start hedging once short beyond half the limit
-HEDGE_ORDER_SIZE = 1                # small buy size for hedging (compared to ORDER_SIZE=10)
+HEDGE_ORDER_SIZE = 2                # small buy size for hedging (compared to ORDER_SIZE=10)
 
 @dataclass
 class ProductContext:
