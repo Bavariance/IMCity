@@ -3,7 +3,8 @@ import json
 from abc import ABC, abstractmethod
 from dataclasses import asdict
 from functools import cached_property
-from typing import Any, Callable
+from typing import Any, Callable, Dict
+from threading import Thread
 import time
 
 import requests
@@ -59,6 +60,8 @@ class BaseBot(ABC):
         self._sse_thread: SSEThread | None = None
         self._request_manager = RequestManager(1.0)
 
+        self.positions: Dict[str, int] = {}
+
     @cached_property
     def auth_token(self):
         return self._authenticate()
@@ -74,6 +77,7 @@ class BaseBot(ABC):
                 "Bot already running. Please use the `stop()` method before trying again."
             )
 
+        # 1. Start Background Listener (Non-Blocking)
         self._sse_thread = SSEThread(
             bearer=self.auth_token,
             url=f"{self._cmi_url}/api/market/stream",
@@ -85,10 +89,27 @@ class BaseBot(ABC):
         self._sse_thread.start()
         print("SSEThread started.")
 
+        # 2. Initialize positions state
+        print("Fetching initial positions...")
+        try:
+            # Pre-fill positions so we don't assume 0
+            initial = self.request_positions()
+            if initial:
+                self.positions = initial
+        except Exception as e:
+            print(f"Warning: Could not fetch initial positions: {e}")
+
+        # 3. Start Main Trading Loop (Blocking)
+        print("Entering Trading Loop (Main Thread)...")
+        try:
+            self.run_trading_loop()
+        except KeyboardInterrupt:
+            print("\nUser stopped the bot.")
+        finally:
+            self.stop()
+
     def stop(self) -> None:
-        """
-        Closes SSE thread
-        """
+        """Closes SSE thread"""
         print("Closing SSE Thread...")
         self._sse_thread.close()
         self._sse_thread.join()
@@ -102,6 +123,13 @@ class BaseBot(ABC):
     @abstractmethod
     def on_trades(self, trades: list[Trade]):
         raise NotImplementedError("You must implement the on_trades method!")
+
+    @abstractmethod
+    def run_trading_loop(self):
+        """
+        The main logic loop. This should be an infinite loop (while True).
+        """
+        raise NotImplementedError("You must implement the run_trading_loop method!")
 
     def _get_headers(self) -> dict[str, str]:
         return {**STANDARD_HEADERS, "Authorization": self.auth_token}

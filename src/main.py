@@ -13,15 +13,9 @@ def main():
     username = os.getenv("IMC_USERNAME")
     password = os.getenv("IMC_PASSWORD")
 
-    try:
-        bot = BavarianceBot(TEST_EXCHANGE, username, password)
-        # TODO: Uncomment the code below
-        bot.start()
-
-        while True:
-            pass
-    except KeyboardInterrupt as e:
-        bot.stop()
+    # CTRL + C to stop the bot
+    bot = BavarianceBot(TEST_EXCHANGE, username, password)
+    bot.start() 
 
 
 if __name__ == "__main__":

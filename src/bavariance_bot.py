@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import Callable, Tuple, Dict
+from typing import Callable, Tuple, Dict, List
+import time
 
 from base_bot import BaseBot
 from imc_types import OrderBook, Trade, Side, OrderRequest, Order
@@ -32,56 +33,56 @@ class ProductContext:
 class ProductContextManager:
     def __init__(self, ctx: ProductContext):
         self.ctx = ctx
+        self.orderbooks: Dict[str, OrderBook] = {}
+
+    def update_orderbook(self, orderbook: OrderBook):
+        """Updates the internal state with the latest market data."""
+        self.orderbooks[orderbook.product] = orderbook
 
     @staticmethod
-    def _separate_orders(orderbook: OrderBook) -> Tuple[list, list, list, list]:
-        """Separates own orders from market orders to avoid trading against oneself."""
-        own_buy_orders = []
-        others_buy_orders = []
-        for buy_order in orderbook.buy_orders:
-            if buy_order.volume == buy_order.own_volume:
-                own_buy_orders.append(buy_order)
+    def _separate_orders(orderbook: OrderBook) -> Tuple[List, List, List, List]:
+        """Separates own orders from market orders."""
+        own_buy, others_buy = [], []
+        for order in orderbook.buy_orders:
+            if order.volume == order.own_volume:
+                own_buy.append(order)
             else:
-                others_buy_orders.append(Order(price=buy_order.price, volume=buy_order.volume - buy_order.own_volume, own_volume=0))
+                # Create virtual order with remaining volume
+                others_buy.append(Order(price=order.price, volume=order.volume - order.own_volume, own_volume=0))
 
-        own_sell_orders = []
-        others_sell_orders = []
-        for sell_order in orderbook.sell_orders:
-            if sell_order.volume == sell_order.own_volume:
-                # FIXED BUG: Was appending to own_buy_orders in original code
-                own_sell_orders.append(sell_order)
+        own_sell, others_sell = [], []
+        for order in orderbook.sell_orders:
+            if order.volume == order.own_volume:
+                own_sell.append(order)
             else:
-                others_sell_orders.append(Order(price=sell_order.price, volume=sell_order.volume - sell_order.own_volume, own_volume=0))
+                others_sell.append(Order(price=order.price, volume=order.volume - order.own_volume, own_volume=0))
 
-        return own_buy_orders, others_buy_orders, own_sell_orders, others_sell_orders
+        return own_buy, others_buy, own_sell, others_sell
 
-    def _get_position(self, bot: BaseBot, product_name: str) -> int:
-        positions = bot.request_positions() or {}
-        return positions.get(product_name, 0)
-
-    def handle_orderbook_update(self, orderbook: OrderBook, bot: BaseBot):
+    def execute_trading_logic(self, bot: BaseBot):
         """
-        Entry point: Determines which product updated and calculates 
-        the correct fair value using the shared models.
+        The active trading entry point. 
+        Calculates predictions and executes orders based on the latest known state.
         """
-        # 1. Get predictions from the underlying "Real Value" models
-        # Note: Depending on your model logic, you might only want to step() 
-        # the model once per tick, not per product update. 
+        # 1. Get predictions (assuming models handle their own time/state steps)
         val_1 = self.ctx.prediction_model_1.predict_next_time_step()
         val_2 = self.ctx.prediction_model_2.predict_next_time_step()
 
-        # 2. Determine which product we are trading and select the correct formula
-       # if orderbook.product == "2_Eisbach_Call":
+        # 2. Execute logic for Product 1
+        # if orderbook.product == "2_Eisbach_Call":
         #    return
 
-        if orderbook.product == self.ctx.product_name_1:
-            print("bruh")
-            fair_value = self.ctx.formula_1(val_1, val_2)
-            self._process_single_product(orderbook, bot, fair_value)
-            
-        #elif orderbook.product == self.ctx.product_name_2:
-         #   fair_value = self.ctx.formula_2(val_1, val_2)
-          #  self._process_single_product(orderbook, bot, fair_value)
+        # 2. Execute logic for Product 1
+        if self.ctx.product_name_1 in self.orderbooks:
+            ob_1 = self.orderbooks[self.ctx.product_name_1]
+            predicted_fair_value_1 = self.ctx.formula_1(val_1, val_2)
+            self._process_single_product(ob_1, bot, predicted_fair_value_1)
+
+        # 3. Execute logic for Product 2
+        # if self.ctx.product_name_2 in self.orderbooks:
+        #     ob_2 = self.orderbooks[self.ctx.product_name_2]
+        #     predicted_fair_value_2 = self.ctx.formula_2(val_1, val_2)
+        #     self._process_single_product(ob_2, bot, predicted_fair_value_2)
 
     def _process_single_product(self, orderbook: OrderBook, bot: BaseBot, predicted_value: float):
         """
@@ -92,22 +93,25 @@ class ProductContextManager:
         product = orderbook.product
         own_buy, others_buy, own_sell, others_sell = self._separate_orders(orderbook)
         
-        current_position = self._get_position(bot, product)
+        current_position = bot.positions.get(product, 0)
         tick = orderbook.tick_size
         
         best_bid = others_buy[0].price if others_buy else None
         best_ask = others_sell[0].price if others_sell else None
 
         THRESHOLD = 2 * tick
-        ORDER_SIZE = 10 
+        ORDER_SIZE = 10  # TODO: Anpassen
 
         # --- 1. Cancel existing orders ---
+        # TODO: Replace with cancel all orders API call
         for o in own_buy:
             bot.cancel_order(product, o.price)
         for o in own_sell:
             bot.cancel_order(product, o.price)
 
         # --- 2. Helper Checks ---
+        # TODO: These don't work?
+        # Failed to send order, OrderRequest(product='1_Eisbach', price=462, side=<Side.BUY: 'BUY'>, volume=10), with response b'{"errorCode":"BAD_REQUEST","message":"Volume of 10 specified would exceed the exposure limit. Canceled.","timestamp":"2025-11-22T23:33:24.280328869Z","requestUri":"/api/order"}'
         def can_buy(size: int) -> bool:
             return current_position + size <= POSITION_LIMIT
 
@@ -183,7 +187,7 @@ class BavarianceBot(BaseBot):
             prediction_model_2=model_eisbach_level,
             # TODO: Update formulas
             formula_1=lambda flow, level: round(flow*level),  # 1_Eisbach
-            formula_2=lambda flow, level: (flow + level) * 1.1  # 2_Eisbach_Call
+            formula_2=lambda flow, level: (flow + level) * 1.1  # 2_Eisbach_Call, TODO: Add correct formula
         )
         mgr_eisbach = ProductContextManager(ctx_eisbach)
         self.product_managers["1_Eisbach"] = mgr_eisbach
@@ -240,14 +244,49 @@ class BavarianceBot(BaseBot):
         Handle trade updates if necessary. 
         Currently mostly for logging or tracking PnL.
         """
-        pass
+        for trade in trades:
+            if trade.buyer == self.username or trade.seller == self.username:
+                print(f" [EXECUTION] {trade.product}: {trade.side} {trade.volume} @ {trade.price}")
 
     def on_orderbook(self, orderbook: OrderBook):
         """
         Route orderbook updates to the correct ProductContextManager.
         """
         manager = self.product_managers.get(orderbook.product)
-        if manager is not None:
-            manager.handle_orderbook_update(orderbook, self)
+        if manager:
+            manager.update_orderbook(orderbook)
         else:
-            print(f"Warning: Received orderbook for unknown product {orderbook.product}")
+            print(f"Warning: Unknown product {orderbook.product}")
+
+    def run_trading_loop(self):
+        # Set interval to 10 secs
+        INTERVAL = 10 
+        
+        while True:
+            start_time = time.time()
+            print(f"\n--- Starting Trading Cycle: {time.ctime(start_time)} ---")
+
+            # 1. UPDATE POSITIONS (Source of Truth)
+            # We fetch the definitive positions from the API before making any decisions.
+            # This eliminates any drift from missing 'on_trade' events.
+            server_positions = self.request_positions()
+            if server_positions is not None:
+                self.positions = server_positions
+                print(f"Current Positions: {self.positions}")
+            else:
+                print("CRITICAL: Failed to fetch positions. Skipping cycle to prevent errors.")
+                continue
+
+            # 2. EXECUTE STRATEGY
+            # We iterate over our managers, which now have the latest OrderBook (from SSE)
+            # and the latest Positions (from API).
+            unique_managers = set(self.product_managers.values())
+            for manager in unique_managers:
+                try:
+                    manager.execute_trading_logic(self)
+                except Exception as e:
+                    print(f"Error in strategy execution: {e}")
+
+            # 3. SLEEP UNTIL NEXT CYCLE
+            elapsed = time.time() - start_time
+            time.sleep(max(0, INTERVAL - elapsed))
