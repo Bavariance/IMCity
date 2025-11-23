@@ -45,6 +45,7 @@ class WeatherModel(ModelTrainer):
     # Reads the csv file filename and returns a dataframe with date and temperature and humidity
     def read_file(self):
         """Liest Wetterdaten und berechnet Settlement-Wert als Ziel"""
+        get_data_weather_and_store_file()
         self.df = pd.read_csv(self.WEATHER_FILE)
         self.df['Date'] = pd.to_datetime(self.df['Date'])
         self.df = self.df.sort_values('Date').reset_index(drop=True)
@@ -153,6 +154,7 @@ class WeatherModel(ModelTrainer):
         comparison.to_csv(output_path, sep=';', decimal=',')
 
     def predict_next_time_step(self):
+        self.read_file()
         # 10.1 Neuen Zeitstempel definieren
         next_timestamp = self.df.index.max() + pd.Timedelta(minutes=15)
 
@@ -178,6 +180,7 @@ class WeatherModel(ModelTrainer):
         return (pred_rf_next + pred_xgb_next + pred_lgb_next) / 3.0
 
     def predict_until_target(self, target_datetime):
+        self.read_file()
         """Predicts settlement values until target datetime (Sonntag 10:00)"""
         current_time = self.df.index.max()
         predictions = []

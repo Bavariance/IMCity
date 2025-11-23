@@ -299,10 +299,10 @@ class WeatherPredictionModel(PredictionModel):
         self.rf, self.xgb_model, self.lgb_model = self.init_models()
         self.read_file()
 
-
     # Reads the csv file filename and returns a dataframe with date and temperature and humidity
     def read_file(self):
         """Liest Wetterdaten und berechnet Settlement-Wert als Ziel"""
+        get_data_weather_and_store_file()
         self.df = pd.read_csv(self.WEATHER_FILE)
         self.df['Date'] = pd.to_datetime(self.df['Date'])
         self.df = self.df.sort_values('Date').reset_index(drop=True)
@@ -344,8 +344,74 @@ class WeatherPredictionModel(PredictionModel):
         self.X_train, self.X_test = X.iloc[:split_idx], X.iloc[split_idx:]
         self.y_train, self.y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
+    def train_models(self):
+        # 1. Random Forest
+        print("Starting training for Random Forest.")
+        self.rf.fit(self.X_train, self.y_train)
+        print("Training for Random Forest complete.")
+        print("Starting training for XGBoost.")
+        # 2. XGBoost
+        self.xgb_model.fit(self.X_train, self.y_train)
+        print("Training for XGB complete.")
+        print("Starting training for LighGBM.")
+        # 3. LightGBM
+        self.lgb_model.fit(self.X_train, self.y_train)
+        print("Training for LightGBM complete.")
+
+    def init_models(self):
+        rf = RandomForestRegressor(
+            n_estimators=200,
+            random_state=42,
+            n_jobs=-1
+        )
+
+        # XGBoost
+        xgb_model = xgb.XGBRegressor(
+            n_estimators=300,
+            learning_rate=0.05,
+            max_depth=5,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42
+        )
+
+        # LightGBM
+        lgb_model = lgb.LGBMRegressor(
+            n_estimators=300,
+            learning_rate=0.05,
+            max_depth=-1,
+            num_leaves=31,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42
+        )
+
+        return rf, xgb_model, lgb_model
+
+    def build_ensemble_and_predict(self):
+        # We predict the next value for X_test (input containing data of last 30 days)
+        pred_rf = self.rf.predict(self.X_test)
+        pred_xgb = self.xgb_model.predict(self.X_test)
+        pred_lgb = self.lgb_model.predict(self.X_test)
+        # Mean over all predictions is our final prediction
+        ensemble_pred = (pred_xgb + pred_rf + pred_lgb) / 3
+        return ensemble_pred
+
+    def evaluate_error(self, y_test, ensemble_pred):
+        mse = mean_squared_error(y_test, ensemble_pred)
+        print("Mean Squared Error (MSE):", mse)
+
+    def output_comparison(self, y_test, ensemble_pred):
+        comparison = pd.DataFrame({
+            'wasserstand_real': y_test,
+            'ensemble_pred': ensemble_pred
+        }, index=y_test.index)
+        comparison["error"] = comparison["ensemble_pred"] - comparison["wasserstand_real"]
+        output_path = "wasserstand_predictions_vs_actual.csv"
+        comparison.to_csv(output_path, sep=';', decimal=',')
 
     def predict_next_time_step(self):
+        self.read_file()
         # 10.1 Neuen Zeitstempel definieren
         next_timestamp = self.df.index.max() + pd.Timedelta(minutes=15)
 
@@ -371,6 +437,7 @@ class WeatherPredictionModel(PredictionModel):
         return (pred_rf_next + pred_xgb_next + pred_lgb_next) / 3.0
 
     def predict_until_target(self, target_datetime):
+        self.read_file()
         """Predicts settlement values until target datetime (Sonntag 10:00)"""
         current_time = self.df.index.max()
         predictions = []
