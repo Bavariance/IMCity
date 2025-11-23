@@ -25,6 +25,82 @@ class ModelTrainer(ABC):
 
 
 
+
+# Open-Meteo API - kostenlos, keine API-Key nötig
+def get_munich_weather():
+    """Holt aktuelle und historische Wetterdaten für München"""
+
+    # München Koordinaten
+    lat, lon = 48.1351, 11.5820
+
+    # Zeitraum: letzte 2 Stunden (für 30-min Intervalle)
+    end_time = datetime.now()
+    start_time = end_time - timedelta(hours=2)
+
+    # Open-Meteo API
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": ["temperature_2m", "relative_humidity_2m"],
+        "start_date": start_time.strftime("%Y-%m-%d"),
+        "end_date": end_time.strftime("%Y-%m-%d"),
+        "timezone": "Europe/Berlin"
+    }
+
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    # Daten verarbeiten
+    times = data["hourly"]["time"]
+    temps_c = data["hourly"]["temperature_2m"]
+    humidity = data["hourly"]["relative_humidity_2m"]
+
+    # Celsius zu Fahrenheit
+    temps_f = [(t * 9 / 5) + 32 if t is not None else None for t in temps_c]
+
+    # DataFrame erstellen
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(times),
+        "Temperature": temps_f,
+        "Humidity": humidity
+    })
+
+    # Nur gültige Werte (keine None)
+    df = df.dropna()
+
+    # Auf 30-min Intervalle resamplen (nimm letzte 3 Werte)
+    df = df.tail(3)
+
+    return df
+
+def get_data_weather_and_store_file():
+    # Wetterdaten holen
+    df = get_munich_weather()
+
+    print("Munich Weather Data (Real-time)")
+    print("=" * 60)
+    print(df.to_string(index=False))
+    print("\n")
+
+    # Settlement Berechnung: sum of (temperature*2 + humidity) für alle Intervalle
+    if len(df) >= 3:
+        settlement = sum(row["Temperature"] * 2 + row["Humidity"] for _, row in df.iterrows())
+
+        print("Market Settlement Calculation")
+        print("=" * 60)
+        for idx, row in df.iterrows():
+            calc = row["Temperature"] * 2 + row["Humidity"]
+            print(f"{row['Date']}: ({row['Temperature']:.1f}*2 + {row['Humidity']:.0f}) = {calc:.1f}")
+
+        print(f"\nSettlement Value: {settlement:.1f}")
+    else:
+        print("Nicht genug Daten für Settlement-Berechnung")
+
+    # Daten speichern
+    df.to_csv("../data/munich_weather_data.csv", index=False)
+    print(f"\n✓ Daten gespeichert in: munich_weather_data.csv")
+
 # TODO: Implement models
 
 class WeatherModel(ModelTrainer):
@@ -249,78 +325,3 @@ def main():
     model.evaluate_error(model.y_test, pred)
 main()
 
-
-# Open-Meteo API - kostenlos, keine API-Key nötig
-def get_munich_weather():
-    """Holt aktuelle und historische Wetterdaten für München"""
-
-    # München Koordinaten
-    lat, lon = 48.1351, 11.5820
-
-    # Zeitraum: letzte 2 Stunden (für 30-min Intervalle)
-    end_time = datetime.now()
-    start_time = end_time - timedelta(hours=2)
-
-    # Open-Meteo API
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "hourly": ["temperature_2m", "relative_humidity_2m"],
-        "start_date": start_time.strftime("%Y-%m-%d"),
-        "end_date": end_time.strftime("%Y-%m-%d"),
-        "timezone": "Europe/Berlin"
-    }
-
-    response = requests.get(url, params=params)
-    data = response.json()
-
-    # Daten verarbeiten
-    times = data["hourly"]["time"]
-    temps_c = data["hourly"]["temperature_2m"]
-    humidity = data["hourly"]["relative_humidity_2m"]
-
-    # Celsius zu Fahrenheit
-    temps_f = [(t * 9 / 5) + 32 if t is not None else None for t in temps_c]
-
-    # DataFrame erstellen
-    df = pd.DataFrame({
-        "Date": pd.to_datetime(times),
-        "Temperature": temps_f,
-        "Humidity": humidity
-    })
-
-    # Nur gültige Werte (keine None)
-    df = df.dropna()
-
-    # Auf 30-min Intervalle resamplen (nimm letzte 3 Werte)
-    df = df.tail(3)
-
-    return df
-
-def get_data_weather_and_store_file():
-    # Wetterdaten holen
-    df = get_munich_weather()
-
-    print("Munich Weather Data (Real-time)")
-    print("=" * 60)
-    print(df.to_string(index=False))
-    print("\n")
-
-    # Settlement Berechnung: sum of (temperature*2 + humidity) für alle Intervalle
-    if len(df) >= 3:
-        settlement = sum(row["Temperature"] * 2 + row["Humidity"] for _, row in df.iterrows())
-
-        print("Market Settlement Calculation")
-        print("=" * 60)
-        for idx, row in df.iterrows():
-            calc = row["Temperature"] * 2 + row["Humidity"]
-            print(f"{row['Date']}: ({row['Temperature']:.1f}*2 + {row['Humidity']:.0f}) = {calc:.1f}")
-
-        print(f"\nSettlement Value: {settlement:.1f}")
-    else:
-        print("Nicht genug Daten für Settlement-Berechnung")
-
-    # Daten speichern
-    df.to_csv("../data/munich_weather_data.csv", index=False)
-    print(f"\n✓ Daten gespeichert in: munich_weather_data.csv")
