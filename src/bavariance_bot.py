@@ -1,13 +1,17 @@
 from dataclasses import dataclass
 from typing import Callable, Tuple, Dict, List
 import time
+import logging  # <--- ADDED
 
 from base_bot import BaseBot
 from imc_types import OrderBook, Trade, Side, OrderRequest, Order
 from prediction_model import PredictionModel, EisbachEnsemblePredictionModel, EisbachEnsembleFlowPredictionModel
 
 
-__all__ = ['BavarianceBot']  # Export only the bot class
+__all__ = ['BavarianceBot']
+
+# Setup a logger for this specific file
+logger = logging.getLogger(__name__)
 
 POSITION_LIMIT = 200
 
@@ -64,9 +68,14 @@ class ProductContextManager:
         The active trading entry point. 
         Calculates predictions and executes orders based on the latest known state.
         """
+        # Debug level for granular loop info
+        logger.debug(f"[LOGIC] Executing trading logic for context: {self.ctx.product_name_1} & {self.ctx.product_name_2}")
+        
         # 1. Get predictions (assuming models handle their own time/state steps)
         val_1 = self.ctx.prediction_model_1.predict_next_time_step()
         val_2 = self.ctx.prediction_model_2.predict_next_time_step()
+        
+        logger.debug(f"[LOGIC] Raw Predictions: Val1={val_1}, Val2={val_2}")
 
         # 2. Execute logic for Product 1
         # if orderbook.product == "2_Eisbach_Call":
@@ -76,7 +85,10 @@ class ProductContextManager:
         if self.ctx.product_name_1 in self.orderbooks:
             ob_1 = self.orderbooks[self.ctx.product_name_1]
             predicted_fair_value_1 = self.ctx.formula_1(val_1, val_2)
+            logger.info(f"[LOGIC] {self.ctx.product_name_1}: Calculated Fair Value = {predicted_fair_value_1}")
             self._process_single_product(ob_1, bot, predicted_fair_value_1)
+        else:
+            logger.warning(f"[LOGIC] {self.ctx.product_name_1}: No Orderbook found. Skipping.")
 
         # 3. Execute logic for Product 2
         # if self.ctx.product_name_2 in self.orderbooks:
@@ -89,77 +101,101 @@ class ProductContextManager:
         Generic logic to cancel orders, check limits, and place new orders 
         based on a calculated predicted_value.
         """
-        print(f"Predicted value for {orderbook.product} = {predicted_value}")
+        logger.debug(f"[STRATEGY] Processing {orderbook.product} | FairValue: {predicted_value:.2f}")
         product = orderbook.product
         own_buy, others_buy, own_sell, others_sell = self._separate_orders(orderbook)
         
         current_position = bot.positions.get(product, 0)
+        logger.info(f"[STRATEGY] {product} Current Position: {current_position} (Limit: {POSITION_LIMIT})")
+        
         tick = orderbook.tick_size
         
         best_bid = others_buy[0].price if others_buy else None
         best_ask = others_sell[0].price if others_sell else None
+        logger.debug(f"[STRATEGY] Market State: Best Bid={best_bid}, Best Ask={best_ask}")
 
         THRESHOLD = 2 * tick
         ORDER_SIZE = 10  # TODO: Anpassen
 
         # --- 1. Cancel existing orders ---
         # TODO: Replace with cancel all orders API call
-        for o in own_buy:
-            bot.cancel_order(product, o.price)
-        for o in own_sell:
-            bot.cancel_order(product, o.price)
+        if own_buy or own_sell:
+            logger.info(f"[STRATEGY] Cancelling {len(own_buy)} buy orders and {len(own_sell)} sell orders")
+            for o in own_buy:
+                bot.cancel_order(product, o.price)
+            for o in own_sell:
+                bot.cancel_order(product, o.price)
 
         # --- 2. Helper Checks ---
         # TODO: These don't work?
         # Failed to send order, OrderRequest(product='1_Eisbach', price=462, side=<Side.BUY: 'BUY'>, volume=10), with response b'{"errorCode":"BAD_REQUEST","message":"Volume of 10 specified would exceed the exposure limit. Canceled.","timestamp":"2025-11-22T23:33:24.280328869Z","requestUri":"/api/order"}'
         def can_buy(size: int) -> bool:
-            return current_position + size <= POSITION_LIMIT
+            allowed = current_position + size <= POSITION_LIMIT
+            if not allowed:
+                logger.warning(f"[STRATEGY] Cannot BUY {size}. Resulting Pos {current_position + size} > {POSITION_LIMIT}")
+            return allowed
 
         def can_sell(size: int) -> bool:
-            return current_position - size >= -POSITION_LIMIT
+            allowed = current_position - size >= -POSITION_LIMIT
+            if not allowed:
+                logger.warning(f"[STRATEGY] Cannot SELL {size}. Resulting Pos {current_position - size} < {-POSITION_LIMIT}")
+            return allowed
 
         # --- 3. Trading Logic ---
-        
         # Case A: Empty Book (Quote around prediction)
         if best_bid is None and best_ask is None:
+            logger.info(f"[STRATEGY] DECISION: Case A (Empty Book). Quoting spread around {predicted_value}")
             bid_price = predicted_value - tick
             ask_price = predicted_value + tick
             
             if can_buy(ORDER_SIZE):
+                logger.info(f"[STRATEGY] -> Sending BUY order @ {round(bid_price)}")
                 bot.send_order(OrderRequest(product, round(bid_price), Side.BUY, ORDER_SIZE))
             if can_sell(ORDER_SIZE):
+                logger.info(f"[STRATEGY] -> Sending SELL order @ {round(ask_price)}")
                 bot.send_order(OrderRequest(product, round(ask_price), Side.SELL, ORDER_SIZE))
             return
 
         # Case B: Only Asks exist (Place bid below)
         if best_bid is None and best_ask is not None:
             bid_price = best_ask - 2 * tick
+            logger.info(f"[STRATEGY] DECISION: Case B (Only Asks). Placing Bid below best ask ({best_ask}) -> {bid_price}")
             if can_buy(ORDER_SIZE):
+                logger.info(f"[STRATEGY] -> Sending BUY order @ {round(bid_price)}")
                 bot.send_order(OrderRequest(product, round(bid_price), Side.BUY, ORDER_SIZE))
             return
 
         # Case C: Only Bids exist (Place ask above)
         if best_ask is None and best_bid is not None:
             ask_price = best_bid + 2 * tick
+            logger.info(f"[STRATEGY] DECISION: Case C (Only Bids). Placing Ask above best bid ({best_bid}) -> {ask_price}")
             if can_sell(ORDER_SIZE):
+                logger.info(f"[STRATEGY] -> Sending SELL order @ {round(ask_price)}")
                 bot.send_order(OrderRequest(product, round(ask_price), Side.SELL, ORDER_SIZE))
             return
 
         # Case D: Market Active - Directional Trading
         mid = (best_bid + best_ask) / 2
         diff = predicted_value - mid
+        logger.debug(f"[STRATEGY] Analysis: Mid={mid}, Diff (PV - Mid)={diff:.2f}, Threshold={THRESHOLD}")
 
         # Bullish signal
         if diff > THRESHOLD and can_buy(ORDER_SIZE):
+            logger.info(f"[STRATEGY] DECISION: Bullish (Diff > Threshold). Buying.")
             bid_price = mid - tick # Try to front-run or join best bid
+            logger.info(f"[STRATEGY] -> Sending BUY order @ {round(bid_price)}")
             bot.send_order(OrderRequest(product, round(bid_price), Side.BUY, ORDER_SIZE))
 
         # Bearish signal
         elif diff < -THRESHOLD and can_sell(ORDER_SIZE):
+            logger.info(f"[STRATEGY] DECISION: Bearish (Diff < -Threshold). Selling.")
             ask_price = mid + tick
+            logger.info(f"[STRATEGY] -> Sending SELL order @ {round(ask_price)}")
             bot.send_order(OrderRequest(product, round(ask_price), Side.SELL, ORDER_SIZE))
 
         # Else: Inside threshold, hold position.
+        else:
+            logger.debug(f"[STRATEGY] DECISION: Holding. Diff {diff:.2f} is within threshold or limits reached.")
 
 
 class BavarianceBot(BaseBot):
@@ -246,7 +282,8 @@ class BavarianceBot(BaseBot):
         """
         for trade in trades:
             if trade.buyer == self.username or trade.seller == self.username:
-                print(f" [EXECUTION] {trade.product}: {trade.side} {trade.volume} @ {trade.price}")
+                # Trade execution is critical info, so we use INFO or WARNING
+                logger.info(f" [EXECUTION] {trade.product}: {trade.side} {trade.volume} @ {trade.price}")
 
     def on_orderbook(self, orderbook: OrderBook):
         """
@@ -256,17 +293,16 @@ class BavarianceBot(BaseBot):
         if manager:
             manager.update_orderbook(orderbook)
         else:
-            print(f"Warning: Unknown product {orderbook.product}")
+            # Warning level for data integrity issues
+            logger.warning(f"Warning: Unknown product {orderbook.product}")
 
     def run_trading_loop(self):
-        bot.send_order(OrderRequest("1_Eisbach", round(bid_price), Side.BUY, ORDER_SIZE))
-        
         # Set interval to 10 secs
         INTERVAL = 10 
         
         while True:
             start_time = time.time()
-            print(f"\n--- Starting Trading Cycle: {time.ctime(start_time)} ---")
+            logger.info(f"\n--- Starting Trading Cycle: {time.ctime(start_time)} ---")
 
             # 1. UPDATE POSITIONS (Source of Truth)
             # We fetch the definitive positions from the API before making any decisions.
@@ -274,9 +310,9 @@ class BavarianceBot(BaseBot):
             server_positions = self.request_positions()
             if server_positions is not None:
                 self.positions = server_positions
-                print(f"Current Positions: {self.positions}")
+                logger.info(f"Current Positions: {self.positions}")
             else:
-                print("CRITICAL: Failed to fetch positions. Skipping cycle to prevent errors.")
+                logger.error("CRITICAL: Failed to fetch positions. Skipping cycle to prevent errors.")
                 continue
 
             # 2. EXECUTE STRATEGY
@@ -287,7 +323,7 @@ class BavarianceBot(BaseBot):
                 try:
                     manager.execute_trading_logic(self)
                 except Exception as e:
-                    print(f"Error in strategy execution: {e}")
+                    logger.exception("Error in strategy execution") # Will print full traceback automatically
 
             # 3. SLEEP UNTIL NEXT CYCLE
             elapsed = time.time() - start_time
