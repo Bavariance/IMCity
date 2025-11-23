@@ -7,14 +7,22 @@ from base_bot import BaseBot
 from imc_types import OrderBook, Trade, Side, OrderRequest, Order
 from prediction_model import PredictionModel, EisbachEnsemblePredictionModel, EisbachEnsembleFlowPredictionModel
 
-
 __all__ = ['BavarianceBot']
 
 # Setup a logger for this specific file
 logger = logging.getLogger(__name__)
 
-POSITION_LIMIT = 200
+POSITION_LIMIT = 300
 
+# Extra ticks to add on all ASK (sell) quotes to make sells more aggressive (higher prices)
+ASK_PREMIUM_TICKS = 3  # main sell edge in ticks
+
+# Inventory-hedging parameters
+BUY_EDGE_TICKS = 3                 # distance from mid / fair for hedge buys
+SELL_EDGE_TICKS = ASK_PREMIUM_TICKS  # distance from mid / fair for main sells
+
+HEDGE_START_SHORT = -int(0.5 * POSITION_LIMIT)  # start hedging once short beyond half the limit
+HEDGE_ORDER_SIZE = 1                # small buy size for hedging (compared to ORDER_SIZE=10)
 
 @dataclass
 class ProductContext:
@@ -78,10 +86,6 @@ class ProductContextManager:
         logger.debug(f"[LOGIC] Raw Predictions: Val1={val_1}, Val2={val_2}")
 
         # 2. Execute logic for Product 1
-        # if orderbook.product == "2_Eisbach_Call":
-        #    return
-
-        # 2. Execute logic for Product 1
         if self.ctx.product_name_1 in self.orderbooks:
             ob_1 = self.orderbooks[self.ctx.product_name_1]
             predicted_fair_value_1 = self.ctx.formula_1(val_1, val_2)
@@ -90,7 +94,7 @@ class ProductContextManager:
         else:
             logger.warning(f"[LOGIC] {self.ctx.product_name_1}: No Orderbook found. Skipping.")
 
-        # 3. Execute logic for Product 2
+        # 3. Execute logic for Product 2 (currently disabled)
         # if self.ctx.product_name_2 in self.orderbooks:
         #     ob_2 = self.orderbooks[self.ctx.product_name_2]
         #     predicted_fair_value_2 = self.ctx.formula_2(val_1, val_2)
@@ -115,10 +119,9 @@ class ProductContextManager:
         logger.debug(f"[STRATEGY] Market State: Best Bid={best_bid}, Best Ask={best_ask}")
 
         THRESHOLD = 2 * tick
-        ORDER_SIZE = 10  # TODO: Anpassen
+        ORDER_SIZE = 10  # main trade size
 
         # --- 1. Cancel existing orders ---
-        # TODO: Replace with cancel all orders API call
         if own_buy or own_sell:
             logger.info(f"[STRATEGY] Cancelling {len(own_buy)} buy orders and {len(own_sell)} sell orders")
             for o in own_buy:
@@ -127,8 +130,6 @@ class ProductContextManager:
                 bot.cancel_order(product, o.price)
 
         # --- 2. Helper Checks ---
-        # TODO: These don't work?
-        # Failed to send order, OrderRequest(product='1_Eisbach', price=462, side=<Side.BUY: 'BUY'>, volume=10), with response b'{"errorCode":"BAD_REQUEST","message":"Volume of 10 specified would exceed the exposure limit. Canceled.","timestamp":"2025-11-22T23:33:24.280328869Z","requestUri":"/api/order"}'
         def can_buy(size: int) -> bool:
             allowed = current_position + size <= POSITION_LIMIT
             if not allowed:
@@ -142,11 +143,13 @@ class ProductContextManager:
             return allowed
 
         # --- 3. Trading Logic ---
+
         # Case A: Empty Book (Quote around prediction)
         if best_bid is None and best_ask is None:
             logger.info(f"[STRATEGY] DECISION: Case A (Empty Book). Quoting spread around {predicted_value}")
-            bid_price = predicted_value - tick
-            ask_price = predicted_value + tick
+            # Use asymmetric edges: buy closer, sell further
+            bid_price = predicted_value - BUY_EDGE_TICKS * tick
+            ask_price = predicted_value + SELL_EDGE_TICKS * tick
             
             if can_buy(ORDER_SIZE):
                 logger.info(f"[STRATEGY] -> Sending BUY order @ {round(bid_price)}")
@@ -158,6 +161,7 @@ class ProductContextManager:
 
         # Case B: Only Asks exist (Place bid below)
         if best_bid is None and best_ask is not None:
+            # Still just buying; helps reduce shorts naturally
             bid_price = best_ask - 2 * tick
             logger.info(f"[STRATEGY] DECISION: Case B (Only Asks). Placing Bid below best ask ({best_ask}) -> {bid_price}")
             if can_buy(ORDER_SIZE):
@@ -167,11 +171,23 @@ class ProductContextManager:
 
         # Case C: Only Bids exist (Place ask above)
         if best_ask is None and best_bid is not None:
-            ask_price = best_bid + 2 * tick
-            logger.info(f"[STRATEGY] DECISION: Case C (Only Bids). Placing Ask above best bid ({best_bid}) -> {ask_price}")
+            # Main sell quote with edge SELL_EDGE_TICKS above best bid
+            ask_price = best_bid + SELL_EDGE_TICKS * tick
+            logger.info(
+                f"[STRATEGY] DECISION: Case C (Only Bids). "
+                f"Placing Ask above best bid ({best_bid}) with premium -> {ask_price}"
+            )
             if can_sell(ORDER_SIZE):
                 logger.info(f"[STRATEGY] -> Sending SELL order @ {round(ask_price)}")
                 bot.send_order(OrderRequest(product, round(ask_price), Side.SELL, ORDER_SIZE))
+            # Optional: inventory hedge if very short
+            if current_position <= HEDGE_START_SHORT and can_buy(HEDGE_ORDER_SIZE):
+                hedge_bid = best_bid - BUY_EDGE_TICKS * tick
+                logger.info(
+                    f"[STRATEGY] Inventory hedge (short={current_position}). "
+                    f"Placing small BUY @ {round(hedge_bid)}"
+                )
+                bot.send_order(OrderRequest(product, round(hedge_bid), Side.BUY, HEDGE_ORDER_SIZE))
             return
 
         # Case D: Market Active - Directional Trading
@@ -179,24 +195,39 @@ class ProductContextManager:
         diff = predicted_value - mid
         logger.debug(f"[STRATEGY] Analysis: Mid={mid}, Diff (PV - Mid)={diff:.2f}, Threshold={THRESHOLD}")
 
-        # Bullish signal
+        placed_directional_buy = False
+        placed_directional_sell = False
+
+        # Bullish signal: main buy
         if diff > THRESHOLD and can_buy(ORDER_SIZE):
             logger.info(f"[STRATEGY] DECISION: Bullish (Diff > Threshold). Buying.")
-            bid_price = mid - tick # Try to front-run or join best bid
+            bid_price = mid - BUY_EDGE_TICKS * tick  # buy close to mid for good fill prob
             logger.info(f"[STRATEGY] -> Sending BUY order @ {round(bid_price)}")
             bot.send_order(OrderRequest(product, round(bid_price), Side.BUY, ORDER_SIZE))
+            placed_directional_buy = True
 
-        # Bearish signal
+        # Bearish signal: main sell
         elif diff < -THRESHOLD and can_sell(ORDER_SIZE):
             logger.info(f"[STRATEGY] DECISION: Bearish (Diff < -Threshold). Selling.")
-            ask_price = mid + tick
+            # Sell further away from mid for better edge
+            ask_price = mid + SELL_EDGE_TICKS * tick
             logger.info(f"[STRATEGY] -> Sending SELL order @ {round(ask_price)}")
             bot.send_order(OrderRequest(product, round(ask_price), Side.SELL, ORDER_SIZE))
+            placed_directional_sell = True
 
-        # Else: Inside threshold, hold position.
         else:
-            logger.debug(f"[STRATEGY] DECISION: Holding. Diff {diff:.2f} is within threshold or limits reached.")
+            logger.debug(f"[STRATEGY] DECISION: Signal within threshold; using inventory hedge only if needed.")
 
+        # --- 4. Inventory hedge: small buys when too short ---
+        if current_position <= HEDGE_START_SHORT and can_buy(HEDGE_ORDER_SIZE):
+            # Only add extra hedge if we didn't already do a big directional buy this cycle
+            if not placed_directional_buy:
+                hedge_bid = mid - BUY_EDGE_TICKS * tick
+                logger.info(
+                    f"[STRATEGY] Inventory hedge: position {current_position} <= {HEDGE_START_SHORT}. "
+                    f"Placing small BUY @ {round(hedge_bid)}"
+                )
+                bot.send_order(OrderRequest(product, round(hedge_bid), Side.BUY, HEDGE_ORDER_SIZE))
 
 class BavarianceBot(BaseBot):
     def __init__(self, cmi_url: str, username: str, password: str):
@@ -212,9 +243,8 @@ class BavarianceBot(BaseBot):
         # ======================================================================
         # PAIR 1: Eisbach & Eisbach Call
         # ======================================================================
-        # TODO: Ensure these paths are correct
-        model_eisbach_level= EisbachEnsemblePredictionModel("../data/waterlevel_beginn_bis_31.12.2024_ezw_0.csv")
-        model_eisbach_flow = EisbachEnsembleFlowPredictionModel("../data/flowrate_beginn_bis_31.12.2024_ezw_0.csv") # Example
+        model_eisbach_level = EisbachEnsemblePredictionModel("../data/waterlevel_beginn_bis_31.12.2024_ezw_0.csv")
+        model_eisbach_flow = EisbachEnsembleFlowPredictionModel("../data/flowrate_beginn_bis_31.12.2024_ezw_0.csv")
 
         ctx_eisbach = ProductContext(
             product_name_1="1_Eisbach",
@@ -222,7 +252,7 @@ class BavarianceBot(BaseBot):
             prediction_model_1=model_eisbach_flow,
             prediction_model_2=model_eisbach_level,
             # TODO: Update formulas
-            formula_1=lambda flow, level: round(flow*level),  # 1_Eisbach
+            formula_1=lambda flow, level: round(flow * level),  # 1_Eisbach
             formula_2=lambda flow, level: (flow + level) * 1.1  # 2_Eisbach_Call, TODO: Add correct formula
         )
         mgr_eisbach = ProductContextManager(ctx_eisbach)
@@ -230,14 +260,13 @@ class BavarianceBot(BaseBot):
         self.product_managers["2_Eisbach_Call"] = mgr_eisbach
 
         # ======================================================================
-        # PAIR 2: Weather (3 & 4)
+        # PAIR 2: Weather (3 & 4) - placeholders commented out
         # ======================================================================
-        # TODO: Initialize actual models
         # ctx_weather = ProductContext(
         #     product_name_1="3_Weather",
         #     product_name_2="4_Weather",
-        #     prediction_model_1=model_eisbach_flow, # Placeholder
-        #     prediction_model_2=model_eisbach_flow, # Placeholder
+        #     prediction_model_1=model_eisbach_flow,  # Placeholder
+        #     prediction_model_2=model_eisbach_flow,  # Placeholder
         #     formula_1=lambda x, y: x * y, 
         #     formula_2=lambda x, y: x * y + 10
         # )
@@ -245,14 +274,14 @@ class BavarianceBot(BaseBot):
         # self.product_managers["3_Weather"] = mgr_weather
         # self.product_managers["4_Weather"] = mgr_weather
 
-        # # ======================================================================
-        # # PAIR 3: Flights & Airport (5 & 6)
-        # # ======================================================================
+        # ======================================================================
+        # PAIR 3: Flights & Airport (5 & 6) - placeholders commented out
+        # ======================================================================
         # ctx_travel = ProductContext(
         #     product_name_1="5_Flights",
         #     product_name_2="6_Airport",
-        #     prediction_model_1=model_eisbach_flow, # Placeholder
-        #     prediction_model_2=model_eisbach_flow, # Placeholder
+        #     prediction_model_1=model_eisbach_flow,  # Placeholder
+        #     prediction_model_2=model_eisbach_flow,  # Placeholder
         #     formula_1=lambda x, y: x + 50,
         #     formula_2=lambda x, y: y + 50
         # )
@@ -260,14 +289,14 @@ class BavarianceBot(BaseBot):
         # self.product_managers["5_Flights"] = mgr_travel
         # self.product_managers["6_Airport"] = mgr_travel
 
-        # # ======================================================================
-        # # PAIR 4: ETF & Strangle (7 & 8)
-        # # ======================================================================
+        # ======================================================================
+        # PAIR 4: ETF & Strangle (7 & 8) - placeholders commented out
+        # ======================================================================
         # ctx_etf = ProductContext(
         #     product_name_1="7_ETF",
         #     product_name_2="8_ETF_Strangle",
-        #     prediction_model_1=model_eisbach_flow, # Placeholder
-        #     prediction_model_2=model_eisbach_flow, # Placeholder
+        #     prediction_model_1=model_eisbach_flow,  # Placeholder
+        #     prediction_model_2=model_eisbach_flow,  # Placeholder
         #     formula_1=lambda x, y: (x + y) / 2,
         #     formula_2=lambda x, y: abs(x - y)
         # )
@@ -305,8 +334,6 @@ class BavarianceBot(BaseBot):
             logger.info(f"\n--- Starting Trading Cycle: {time.ctime(start_time)} ---")
 
             # 1. UPDATE POSITIONS (Source of Truth)
-            # We fetch the definitive positions from the API before making any decisions.
-            # This eliminates any drift from missing 'on_trade' events.
             server_positions = self.request_positions()
             if server_positions is not None:
                 self.positions = server_positions
@@ -316,14 +343,12 @@ class BavarianceBot(BaseBot):
                 continue
 
             # 2. EXECUTE STRATEGY
-            # We iterate over our managers, which now have the latest OrderBook (from SSE)
-            # and the latest Positions (from API).
             unique_managers = set(self.product_managers.values())
             for manager in unique_managers:
                 try:
                     manager.execute_trading_logic(self)
                 except Exception as e:
-                    logger.exception("Error in strategy execution") # Will print full traceback automatically
+                    logger.exception("Error in strategy execution")  # Will print full traceback automatically
 
             # 3. SLEEP UNTIL NEXT CYCLE
             elapsed = time.time() - start_time
