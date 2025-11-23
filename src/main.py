@@ -14,7 +14,7 @@ def main():
     password = os.getenv("IMC_PASSWORD")
 
     # CTRL + C to stop the bot
-    bot = BavarianceBot(TEST_EXCHANGE, username, password)
+    bot = BavarianceBot(REAL_EXCHANGE, username, password)
     bot.start() 
 
 

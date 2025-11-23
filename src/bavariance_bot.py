@@ -259,6 +259,8 @@ class BavarianceBot(BaseBot):
             print(f"Warning: Unknown product {orderbook.product}")
 
     def run_trading_loop(self):
+        bot.send_order(OrderRequest("1_Eisbach", round(bid_price), Side.BUY, ORDER_SIZE))
+        
         # Set interval to 10 secs
         INTERVAL = 10 
         

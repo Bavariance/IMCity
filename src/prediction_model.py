@@ -167,26 +167,32 @@ class EisbachEnsembleFlowPredictionModel(PredictionModel):
         self.rf, self.xgb_model, self.lgb_model = self.load_models()
 
     def read_eisbach_csv(self):
-        self.df = pd.read_csv(
-            self.EISBACH_FILENAME,
-            sep=';',  # wie in deinem Beispiel
-            encoding='utf-8'
+        bucket_name = os.environ["GCS_BUCKET"]
+        prefix = os.environ.get("GCS_PREFIX", "live_data")
+        object_name = f"{prefix}/eisbach_15min.csv"
+
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(object_name)
+
+        # Download CSV into memory and read with pandas
+        raw_bytes = blob.download_as_bytes()
+        self.df = pd.read_csv(io.BytesIO(raw_bytes))
+
+        # Map to the internal schema used during training
+        # Use local time column as datetime index
+        self.df["datetime"] = pd.to_datetime(
+            self.df["timestamp_local"], format="%Y-%m-%d %H:%M"
         )
-        # Spalten umbenennen
-        self.df = self.df.rename(columns={
-            'Datum': 'datetime',
-            'Abfluss [m³/s]': 'abfluss'
-        })
+        self.df["abfluss"] = self.df["discharge_m3s"].astype(float)
 
-        # Datum/Zeit parsen
-        self.df['datetime'] = pd.to_datetime(self.df['datetime'], format='%Y-%m-%d %H:%M')
-
-        # Kommazahlen in float umwandeln (deutsches Komma)
-        self.df['abfluss'] = self.df['abfluss'].astype(str).str.replace(',', '.').astype(float)
-
-        # Nach Zeit sortieren und als Index setzen
-        self.df = self.df.sort_values('datetime').reset_index(drop=True)
-        self.df = self.df.set_index('datetime')
+        # Sort and set index
+        self.df = (
+            self.df.sort_values("datetime")
+                   .reset_index(drop=True)
+                   .set_index("datetime")
+        )
+    
 
         # =========================
         # 2. Lag-Features bauen
