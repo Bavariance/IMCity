@@ -167,7 +167,7 @@ class EisbachEnsembleFlowPredictionModel(PredictionModel):
         self.rf, self.xgb_model, self.lgb_model = self.load_models()
 
     def read_eisbach_csv(self):
-          bucket_name = os.environ["GCS_BUCKET"]
+        bucket_name = os.environ["GCS_BUCKET"]
         prefix = os.environ.get("GCS_PREFIX", "live_data")
         object_name = f"{prefix}/eisbach_15min.csv"
 
