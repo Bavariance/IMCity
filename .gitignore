@@ -8,3 +8,4 @@ __pycache__/
 # Environment variables
 .env
 .vscode
+src/bot_execution.log
