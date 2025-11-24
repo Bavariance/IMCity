@@ -1,4 +1,4 @@
-# IMCity
+# HackaTUM IMC Challenge Team Repository by Bavariance
 
 ### Virtual Environment
 To setup your Python virtual environment (in Windows), run the following commands:
@@ -17,3 +17,4 @@ IMC_USERNAME=...
 IMC_PASSWORD=...
 ```
 The `.env` file should be created in the root directory.
+
